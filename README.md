@@ -22,8 +22,10 @@ cargo run --release -- dashboard             # live gegen die Wallet
 
 Ein Bildschirm für alles, was passiert und passieren wird:
 
-- **Orbit**: Die Wallet im Zentrum, ihre Positionen als Satelliten (Größe = Wert, grün = Long,
-  rot = Short), unsere 6 Agenten im Ring. Jeder Schritt fliegt als Lichtimpuls durch die Pipeline.
+- **Orbit (3D)**: Die gefolgte Wallet als orangene *Signalquelle* im Zentrum – dort entstehen die
+  Signale. Ihre Positionen kreisen als Satelliten (grün = Long, rot = Short), unsere 6 Agenten sitzen
+  als Licht-Organismen im Ring. Jeder Schritt fliegt als Komet durch die Pipeline, dazu laufen
+  Scans zwischen Agenten und Quelle. Passt die Qualität automatisch an langsame Geräte an.
 - **Agenten** (jeder Schritt der Pipeline):
   SPOTTER (Live-Feed) → TRACKER (Positionen syncen) → SIZER (Größe umrechnen) →
   RISK (Hebel, Limits, Mindestorder) → EXECUTOR (Paper-Order) → LEDGER (PnL, Fees, Journal)

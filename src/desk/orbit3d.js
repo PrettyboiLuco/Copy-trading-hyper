@@ -14,14 +14,14 @@ import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js"
 import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
 
 const CONFIG = {
-  background: "#03050a",
-  coreHot: "#fff4e6",
-  coreWarm: "#ffb547",
-  coreBody: "#5cc8ff",
-  coreDeep: "#1b3a8f",
-  ringMain: "#5cc8ff",
-  ringGlow: "#b9a8ff",
-  scan: "#5cc8ff",
+  background: "#000000",
+  coreHot: "#fff1d6",
+  coreWarm: "#ff9a1f",
+  coreBody: "#ff6a00",
+  coreDeep: "#7a1d00",
+  ringMain: "#00c3ff",
+  ringGlow: "#ff2bd6",
+  scan: "#ff7a00",
   ringRadius: 7,
   coreParticles: 4200,
   agentParticles: 750,
@@ -251,7 +251,8 @@ export function createOrbit3D(container, opts) {
   let pixelRatio = basePixelRatio;
   renderer.setPixelRatio(pixelRatio);
   renderer.setClearColor(CONFIG.background);
-  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  // Neutral keeps hue and saturation where ACES would bleach strong colours.
+  renderer.toneMapping = THREE.NeutralToneMapping;
   renderer.toneMappingExposure = 1.0;
   container.prepend(canvas);
 
@@ -302,7 +303,7 @@ export function createOrbit3D(container, opts) {
       v.randomDirection().multiplyScalar(rand(45, 110));
       a.position.set([v.x, v.y, v.z], i * 3);
       const k = rand(0.15, 0.55);
-      a.aColor.set([0.6 * k, 0.72 * k, 1.0 * k], i * 3);
+      a.aColor.set([k, k, k], i * 3);
       a.aSize[i] = rand(0.8, 2.2);
       a.aSeed[i] = Math.random();
     }
@@ -317,12 +318,12 @@ export function createOrbit3D(container, opts) {
     hot: CONFIG.coreHot, warm: CONFIG.coreWarm, body: CONFIG.coreBody, deep: CONFIG.coreDeep,
   }));
   world.add(core.points);
-  const coreHaze = haze(CONFIG.coreWarm, CONFIG.coreHot, 3.4);
+  const coreHaze = haze(CONFIG.coreBody, CONFIG.coreHot, 5.2);
   world.add(coreHaze);
   billboards.push(coreHaze);
   const coreWire = new THREE.LineSegments(
     new THREE.EdgesGeometry(new THREE.IcosahedronGeometry(1.25, 1)),
-    new THREE.LineBasicMaterial(additive({ color: CONFIG.coreBody, opacity: 0.12 })),
+    new THREE.LineBasicMaterial(additive({ color: CONFIG.coreBody, opacity: 0.18 })),
   );
   world.add(coreWire);
   let coreHeat = 0;
@@ -338,7 +339,7 @@ export function createOrbit3D(container, opts) {
     D.position.set([r, gauss() * 0.5 * (0.1 + r * 0.04), Math.random() * Math.PI * 2], i * 3);
     speedAttr[i] = (0.35 / Math.sqrt(r)) * rand(0.7, 1.3);
     const c = Math.random() < 0.55 ? palette[0] : pick(palette);
-    const k = rand(0.12, 0.5);
+    const k = rand(0.22, 0.7);
     D.aColor.set([c.r * k, c.g * k, c.b * k], i * 3);
     D.aSize[i] = rand(0.35, 0.8);
     D.aSeed[i] = Math.random();
@@ -422,13 +423,7 @@ export function createOrbit3D(container, opts) {
     world.add(ring);
   }
 
-  /* ---------- radar sweep + scan rings ---------- */
-  const sweep = new THREE.Mesh(
-    new THREE.CircleGeometry(CONFIG.ringRadius + 1.6, 48, 0, 0.55),
-    new THREE.MeshBasicMaterial(additive({ color: CONFIG.scan, opacity: 0.015, side: THREE.DoubleSide })),
-  );
-  sweep.rotation.x = -Math.PI / 2;
-  world.add(sweep);
+  /* ---------- scan rings ---------- */
   const scans = Array.from({ length: 5 }, () => {
     const m = new THREE.Mesh(
       new THREE.RingGeometry(0.994, 1.0, 160),
@@ -454,12 +449,13 @@ export function createOrbit3D(container, opts) {
     const g = new THREE.Group();
     const home = new THREE.Vector3(Math.cos(ang) * CONFIG.ringRadius, 0, Math.sin(ang) * CONFIG.ringRadius);
     g.position.copy(home);
-    const warm = c.clone().lerp(new THREE.Color(0xffffff), 0.45);
+    const warm = c.clone().lerp(new THREE.Color(0xffffff), 0.2);
+    const hot = c.clone().lerp(new THREE.Color(0xffffff), 0.55);
     const org = track(organism({
       count: Math.round(CONFIG.agentParticles * q), coreR: 0.24, spikes: CONFIG.agentSpikes, spikeLen: 0.78, cone: 0.3,
-      hot: "#ffffff", warm: "#" + warm.getHexString(), body: opts.colors[ag.id], deep: "#" + c.clone().multiplyScalar(0.3).getHexString(),
+      hot: "#" + hot.getHexString(), warm: "#" + warm.getHexString(), body: opts.colors[ag.id], deep: "#" + c.clone().multiplyScalar(0.45).getHexString(),
     }));
-    const hz = haze(opts.colors[ag.id], "#ffffff", 1.5);
+    const hz = haze(opts.colors[ag.id], "#" + hot.getHexString(), 1.5);
     billboards.push(hz);
     // Faint pylon down to the disk plane.
     const pylon = new THREE.Line(
@@ -744,14 +740,13 @@ export function createOrbit3D(container, opts) {
     ringU.uPulse.value *= Math.exp(-dt * 1.5);
 
     for (const t of threads) t.rotation.y += t.userData.w * dt * speed;
-    sweep.rotation.z -= dt * 0.9 * speed;
     for (const b of billboards) b.quaternion.copy(camera.quaternion);
 
     coreHeat *= Math.exp(-dt * 1.8);
     core.points.rotation.y += dt * 0.12 * speed;
     core.points.rotation.x = Math.sin(now * 0.2) * 0.15;
     stepOrganism(core, dt, coreHeat);
-    coreHaze.material.uniforms.uGlow.value = 0.55 + coreHeat * 0.6;
+    coreHaze.material.uniforms.uGlow.value = 0.8 + coreHeat * 0.6;
     coreHaze.material.uniforms.uTime.value = now;
     coreWire.rotation.y += dt * 0.2;
     coreWire.rotation.x += dt * 0.07;
@@ -894,7 +889,7 @@ export function createOrbit3D(container, opts) {
         if (ag) ag.count.textContent = a.count + " Schritte";
       }
       const short = state.wallet ? state.wallet.slice(0, 6) + "…" + state.wallet.slice(-4) : "–";
-      center.innerHTML = `<span>WALLET</span><b>${short}</b>`;
+      center.innerHTML = `<span>SIGNALQUELLE</span><b>${short}</b>`;
       fresh.forEach((a, i) => onActivity(a, i * 140));
     },
   };

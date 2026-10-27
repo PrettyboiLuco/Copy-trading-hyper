@@ -79,7 +79,7 @@ impl Agent {
     fn role(self) -> &'static str {
         match self {
             Agent::Spotter => "Live-Feed: erkennt Trades & Orders",
-            Agent::Tracker => "Synchronisiert Positionen der Wallet",
+            Agent::Tracker => "Synchronisiert Positionen der Signalquelle",
             Agent::Sizer => "Rechnet Größe auf unser Konto um",
             Agent::Risk => "Hebel, Limits, Mindestorder",
             Agent::Executor => "Führt Paper-Orders aus",
@@ -390,7 +390,7 @@ impl Desk {
             WalletEvent::Trade(t) => {
                 self.state.feed.last_event_ts = Some(now_ms());
                 let text = format!(
-                    "Wallet {} {} {:+} @ {} → Position {:+}",
+                    "Quelle {} {} {:+} @ {} → Position {:+}",
                     label(t),
                     t.coin,
                     round(t.signed_size()),
@@ -536,7 +536,7 @@ impl Desk {
                 Action::Trade => {
                     let text = if d.desired == 0.0 {
                         format!(
-                            "{}: Wallet ist raus → wir schließen {:+}",
+                            "{}: Quelle ist raus → wir schließen {:+}",
                             d.coin,
                             round(d.current)
                         )
@@ -600,7 +600,7 @@ impl Desk {
             .collect();
         self.beat(
             Agent::Sizer,
-            format!("Faktor {scale:.6} (unser Equity / Wallet)"),
+            format!("Faktor {scale:.6} (unser Equity / Quelle)"),
         );
         if !decisions.iter().any(|d| d.action == Action::Trade) {
             self.beat(Agent::Executor, "keine Order nötig");
@@ -720,7 +720,7 @@ impl Desk {
             self.log(
                 Agent::Spotter,
                 Level::Info,
-                "Demo-Feed aktiv (synthetische Wallet)",
+                "Demo-Feed aktiv (synthetische Signalquelle)",
                 None,
             );
         }
