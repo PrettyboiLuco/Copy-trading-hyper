@@ -39,7 +39,9 @@ const CONFIG = {
   brightness: 0.13,
   diskBrightness: 0.4,
   beamBrightness: 0.55,
-  beamTrail: 46,
+  beamTrail: 26,
+  maxBeams: 64,
+  threads: 24,
   beamSize: 1.0,
   ringSweepSpeed: 1.6,
   ringSweepArms: 3,
@@ -51,7 +53,11 @@ const CONFIG = {
   scanEverySec: 3.2,
 };
 
-const POOL = 110;
+const POOL = CONFIG.maxBeams;
+// Adaptive quality: pixel-ratio multipliers tried in turn while frames are slow;
+// the last step also turns bloom off.
+const QUALITY = [1, 0.8, 0.65, 0.5];
+const TARGET_FPS = 40;
 
 const additive = (opts) => ({ transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, ...opts });
 const rand = (a, b) => a + Math.random() * (b - a);
@@ -63,11 +69,21 @@ const PARTICLE_VS = `
   attribute vec3 aColor;
   attribute float aSize, aSeed, aBokeh, aDist;
   uniform float uTime, uSize, uPixelRatio, uEnergy, uFocal, uDof, uDofSize, uBreath;
+  #ifdef ORBIT
+  // Disk particles orbit on the GPU: x = radius, y = height, z = start angle.
+  attribute float aSpeed;
+  uniform float uSpin;
+  #endif
   varying vec3 vColor;
   varying float vSeed, vBlur, vDist;
   void main() {
     vColor = aColor; vSeed = aSeed; vDist = aDist;
     vec3 p = position;
+    #ifdef ORBIT
+    float ang = position.z + aSpeed * uTime * uSpin;
+    float rr = position.x * (1.0 + sin(uTime * 0.6 + aSeed * 50.0) * 0.012);
+    p = vec3(cos(ang) * rr, position.y, sin(ang) * rr);
+    #endif
     float ph = aSeed * 6.2831;
     p *= 1.0 + uBreath * sin(uTime * 0.8 + aDist * 3.0) + uEnergy * 0.18 * aDist;
     p += vec3(sin(uTime * 0.6 + ph), cos(uTime * 0.5 + ph * 1.3), sin(uTime * 0.7 + ph * 0.7)) * 0.012;
@@ -99,8 +115,9 @@ const PARTICLE_FS = `
     gl_FragColor = vec4(c, shape);
   }`;
 
-function particleMaterial(overrides = {}) {
+function particleMaterial(overrides = {}, defines = {}) {
   return new THREE.ShaderMaterial({
+    defines,
     uniforms: {
       uTime: { value: 0 },
       uSize: { value: CONFIG.particleSize },
@@ -220,7 +237,8 @@ export function createOrbit3D(container, opts) {
   canvas.className = "orbit3d";
   let renderer;
   try {
-    renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: "high-performance" });
+    // No MSAA: bloom softens edges anyway and the composer would not use it.
+    renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: "high-performance" });
   } catch (e) {
     console.warn("WebGL nicht verfügbar", e);
     return null;
@@ -229,7 +247,8 @@ export function createOrbit3D(container, opts) {
   const coarse = matchMedia("(pointer: coarse)").matches;
   const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
   const q = mobile ? CONFIG.mobileScale : 1;
-  const pixelRatio = Math.min(devicePixelRatio || 1, mobile ? 1.5 : 2);
+  const basePixelRatio = Math.min(devicePixelRatio || 1, mobile ? 1.25 : 1.5);
+  let pixelRatio = basePixelRatio;
   renderer.setPixelRatio(pixelRatio);
   renderer.setClearColor(CONFIG.background);
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -260,6 +279,9 @@ export function createOrbit3D(container, opts) {
   composer.addPass(new RenderPass(scene, camera));
   const bloom = new UnrealBloomPass(new THREE.Vector2(256, 256), CONFIG.bloomStrength, CONFIG.bloomRadius, CONFIG.bloomThreshold);
   composer.addPass(bloom);
+  // Bloom is blurry by nature: run it at half resolution.
+  const bloomSetSize = bloom.setSize.bind(bloom);
+  bloom.setSize = (w, h) => bloomSetSize(Math.max(1, w >> 1), Math.max(1, h >> 1));
   composer.addPass(new OutputPass());
 
   const col = (hex) => new THREE.Color(hex);
@@ -310,13 +332,11 @@ export function createOrbit3D(container, opts) {
   const N = Math.round(CONFIG.diskParticles * q);
   const disk = new THREE.BufferGeometry();
   const D = setAttrs(disk, N);
-  const pR = new Float32Array(N), pA = new Float32Array(N), pY = new Float32Array(N), pW = new Float32Array(N);
+  const speedAttr = new Float32Array(N);
   for (let i = 0; i < N; i++) {
     const r = 2.4 + Math.pow(Math.random(), 0.8) * 7.2;
-    pR[i] = r;
-    pA[i] = Math.random() * Math.PI * 2;
-    pY[i] = gauss() * 0.5 * (0.1 + r * 0.04);
-    pW[i] = (0.35 / Math.sqrt(r)) * rand(0.7, 1.3);
+    D.position.set([r, gauss() * 0.5 * (0.1 + r * 0.04), Math.random() * Math.PI * 2], i * 3);
+    speedAttr[i] = (0.35 / Math.sqrt(r)) * rand(0.7, 1.3);
     const c = Math.random() < 0.55 ? palette[0] : pick(palette);
     const k = rand(0.12, 0.5);
     D.aColor.set([c.r * k, c.g * k, c.b * k], i * 3);
@@ -324,14 +344,18 @@ export function createOrbit3D(container, opts) {
     D.aSeed[i] = Math.random();
     D.aBokeh[i] = Math.random() < 0.015 ? 1 : 0;
   }
-  const diskMat = particleMaterial({ uBreath: { value: 0 }, uBright: { value: CONFIG.diskBrightness }, uDof: { value: CONFIG.bokeh * 0.35 } });
+  disk.setAttribute("aSpeed", new THREE.BufferAttribute(speedAttr, 1));
+  const diskMat = particleMaterial(
+    { uBreath: { value: 0 }, uBright: { value: CONFIG.diskBrightness }, uDof: { value: CONFIG.bokeh * 0.35 }, uSpin: { value: reduced ? 0.25 : 1 } },
+    { ORBIT: "" },
+  );
   materials.push(diskMat.uniforms);
   const diskPts = new THREE.Points(disk, diskMat);
   diskPts.frustumCulled = false;
   world.add(diskPts);
 
   const threads = [];
-  for (let i = 0; i < 40; i++) {
+  for (let i = 0; i < CONFIG.threads; i++) {
     const r = rand(2.6, 8.8), squash = rand(0.55, 1), pts = [];
     for (let k = 0; k <= 160; k++) {
       const ang = (k / 160) * Math.PI * 2;
@@ -401,7 +425,7 @@ export function createOrbit3D(container, opts) {
   /* ---------- radar sweep + scan rings ---------- */
   const sweep = new THREE.Mesh(
     new THREE.CircleGeometry(CONFIG.ringRadius + 1.6, 48, 0, 0.55),
-    new THREE.MeshBasicMaterial(additive({ color: CONFIG.scan, opacity: 0.03, side: THREE.DoubleSide })),
+    new THREE.MeshBasicMaterial(additive({ color: CONFIG.scan, opacity: 0.015, side: THREE.DoubleSide })),
   );
   sweep.rotation.x = -Math.PI / 2;
   world.add(sweep);
@@ -546,11 +570,14 @@ export function createOrbit3D(container, opts) {
     if (l) l.heat = Math.min(1, l.heat + b.power * 0.6);
   }
 
-  function curvePoint(b, t, out) {
+  // Control points of a beam's arc; refreshed once per frame per beam.
+  function arcOf(b) {
     posOf(b.from, A);
     posOf(b.to, B);
     C.copy(A).add(B).multiplyScalar(0.5).multiplyScalar(0.75);
     C.y += b.lift + A.distanceTo(B) * 0.12;
+  }
+  function bezier(t, out) {
     const u = 1 - t;
     return out.set(
       u * u * A.x + 2 * u * t * C.x + t * t * B.x,
@@ -674,9 +701,37 @@ export function createOrbit3D(container, opts) {
     }
   }
 
+  let visible = true;
+  new IntersectionObserver(([e]) => (visible = e.isIntersecting)).observe(container);
+  let level = 0, sampleT = 0, sampleN = 0, settle = 0;
+  function adapt(rawDt) {
+    // Ignore the first seconds (shader compile) and long pauses (tab switch).
+    if (settle < 2 || rawDt > 0.5) {
+      settle += rawDt;
+      return;
+    }
+    sampleT += rawDt;
+    sampleN++;
+    if (sampleT < 2) return;
+    const fps = sampleN / sampleT;
+    sampleT = sampleN = 0;
+    if (fps < TARGET_FPS && level < QUALITY.length - 1) {
+      level++;
+      pixelRatio = basePixelRatio * QUALITY[level];
+      renderer.setPixelRatio(pixelRatio);
+      ringU.uPixelRatio.value = pixelRatio;
+      resize();
+      bloom.enabled = level < QUALITY.length - 1;
+      settle = 1;
+    }
+  }
+
   function frame() {
     requestAnimationFrame(frame);
-    const dt = Math.min(clock.getDelta(), 0.05);
+    const rawDt = clock.getDelta();
+    if (!visible || document.hidden) return;
+    adapt(rawDt);
+    const dt = Math.min(rawDt, 0.05);
     const now = clock.elapsedTime;
     const speed = reduced ? 0.25 : 1;
     const focal = camera.position.length();
@@ -688,14 +743,6 @@ export function createOrbit3D(container, opts) {
     ringU.uTime.value = now;
     ringU.uPulse.value *= Math.exp(-dt * 1.5);
 
-    for (let i = 0; i < N; i++) {
-      pA[i] += pW[i] * dt * speed;
-      const r = pR[i] * (1 + Math.sin(now * 0.6 + i) * 0.012);
-      D.position[i * 3] = Math.cos(pA[i]) * r;
-      D.position[i * 3 + 1] = pY[i];
-      D.position[i * 3 + 2] = Math.sin(pA[i]) * r;
-    }
-    disk.attributes.position.needsUpdate = true;
     for (const t of threads) t.rotation.y += t.userData.w * dt * speed;
     sweep.rotation.z -= dt * 0.9 * speed;
     for (const b of billboards) b.quaternion.copy(camera.quaternion);
@@ -781,16 +828,14 @@ export function createOrbit3D(container, opts) {
     for (let bi = 0; bi < POOL; bi++) {
       const b = beams[bi];
       const base = bi * T;
-      if (!b.active) {
-        for (let k = 0; k < T; k++) BA.aSize[base + k] = 0;
-        continue;
-      }
+      if (!b.active) continue;
       b.t += dt / b.dur;
+      arcOf(b);
       const head = Math.min(1, b.t), tail = Math.max(0, head - b.trail);
       const fade = b.t > 1 ? Math.max(0, 1 - (b.t - 1) / 0.3) : 1;
       for (let k = 0; k < T; k++) {
         const f = k / (T - 1);
-        curvePoint(b, tail + (head - tail) * f, P);
+        bezier(tail + (head - tail) * f, P);
         const spray = b.spray * (1 - f) * (1 + Math.sin(now * 7 + k));
         const j = jitter[k];
         const i3 = (base + k) * 3;
@@ -809,7 +854,10 @@ export function createOrbit3D(container, opts) {
         b.onArrive = null;
         cb();
       }
-      if (b.t > 1.3) b.active = false;
+      if (b.t > 1.3) {
+        b.active = false;
+        BA.aSize.fill(0, base, base + T);
+      }
     }
     beamGeo.attributes.position.needsUpdate = true;
     beamGeo.attributes.aColor.needsUpdate = true;

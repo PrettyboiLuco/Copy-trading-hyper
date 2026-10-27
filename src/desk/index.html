@@ -297,7 +297,9 @@ const AGENTS = [
   { id: "executor", name: "EXECUTOR", code: "EX" },
   { id: "ledger", name: "LEDGER", code: "LG" },
 ];
-const css = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+// Theme tokens never change at runtime; cache them so drawing never forces a style recalc.
+const cssCache = {};
+const css = (n) => (cssCache[n] ??= getComputedStyle(document.documentElement).getPropertyValue(n).trim());
 const COLOR = Object.fromEntries(AGENTS.map(a => [a.id, css("--" + a.id)]));
 const LONG = css("--long"), SHORT = css("--short");
 // Where a pipeline step travels from -> to in the orbit.
@@ -496,7 +498,12 @@ $("filters").addEventListener("click", (e) => {
   filter = f || null; renderFilters(); if (S) renderLog(S, true);
 });
 
+let logKey = "";
 function renderLog(s, full) {
+  // Rebuild only when there is something new (or the filter changed).
+  const key = (s.activity[0]?.seq ?? 0) + "|" + filter;
+  if (!full && key === logKey) return;
+  logKey = key;
   const list = s.activity.filter(a => !filter || a.agent === filter).slice(0, 150);
   $("lHead").textContent = s.activity.length + " Einträge";
   $("log").innerHTML = list.map(a => {
