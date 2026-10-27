@@ -101,6 +101,8 @@ pub enum Level {
 #[derive(Serialize, Clone)]
 pub struct Activity {
     pub seq: u64,
+    /// Sync round the entry belongs to; all steps of one trade share it.
+    pub tick: u64,
     pub ts: i64,
     pub agent: Agent,
     pub level: Level,
@@ -240,6 +242,7 @@ pub struct Desk {
     seq: u64,
     last_target: Option<HashMap<String, f64>>,
     last_actions: HashMap<String, Action>,
+    in_tick: bool,
 }
 
 fn now_ms() -> i64 {
@@ -316,6 +319,7 @@ impl Desk {
             seq: 0,
             last_target: None,
             last_actions: HashMap::new(),
+            in_tick: false,
         };
         desk.refresh_paper(&Mids::new(), &AccountSnapshot::default());
         desk.publish();
@@ -344,8 +348,15 @@ impl Desk {
         a.count += 1;
         a.last = text.clone();
         a.last_ts = now_ms();
+        // Live-feed events arrive between rounds and belong to the next one.
+        let tick = if self.in_tick {
+            self.state.tick
+        } else {
+            self.state.tick + 1
+        };
         self.state.activity.push_front(Activity {
             seq: self.seq,
+            tick,
             ts: now_ms(),
             agent,
             level,
@@ -421,6 +432,12 @@ impl Desk {
 
     pub fn tick(&mut self, source: &mut dyn DeskSource) {
         self.state.tick += 1;
+        self.in_tick = true;
+        self.tick_inner(source);
+        self.in_tick = false;
+    }
+
+    fn tick_inner(&mut self, source: &mut dyn DeskSource) {
         let snap = match source.poll(&self.state.wallet) {
             Ok(s) => s,
             Err(e) => {
@@ -757,9 +774,48 @@ impl Desk {
     }
 }
 
-/// Round sizes for display to 6 decimals.
-fn round(x: f64) -> f64 {
-    (x * 1e6).round() / 1e6
+/// Quantity for log texts: compact (5.57M, 12.3K) with a few significant
+/// digits; honours `{:+}`.
+struct Qty(f64);
+
+impl std::fmt::Display for Qty {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (x, a) = (self.0, self.0.abs());
+        let sign = if x < 0.0 {
+            "-"
+        } else if f.sign_plus() && x > 0.0 {
+            "+"
+        } else {
+            ""
+        };
+        let trim = |s: String| {
+            if s.contains('.') {
+                s.trim_end_matches('0').trim_end_matches('.').to_string()
+            } else {
+                s
+            }
+        };
+        let body = if a >= 1e6 {
+            format!("{:.2}M", a / 1e6)
+        } else if a >= 1e4 {
+            format!("{:.1}K", a / 1e3)
+        } else if a >= 100.0 {
+            trim(format!("{a:.1}"))
+        } else if a >= 1.0 {
+            trim(format!("{a:.3}"))
+        } else if a == 0.0 {
+            "0".into()
+        } else {
+            // Three significant digits for small sizes (0.0613, 0.000412).
+            let decimals = (2 - a.log10().floor() as i32).clamp(0, 10) as usize;
+            trim(format!("{a:.decimals$}"))
+        };
+        write!(f, "{sign}{body}")
+    }
+}
+
+fn round(x: f64) -> Qty {
+    Qty(x)
 }
 
 /// Price with precision depending on magnitude.
@@ -809,6 +865,18 @@ mod tests {
     use crate::engine::CopyConfig;
     use crate::mock::{ScriptedSource, demo_scenario};
     use crate::paper::PaperAccount;
+
+    #[test]
+    fn quantities_read_compact() {
+        let f = |x: f64| format!("{:+}", Qty(x));
+        assert_eq!(f(5_569_012.0), "+5.57M");
+        assert_eq!(f(-29_567.17), "-29.6K");
+        assert_eq!(f(263.06), "+263.1");
+        assert_eq!(f(1.4199), "+1.42");
+        assert_eq!(f(0.061284), "+0.0613");
+        assert_eq!(f(0.0), "0");
+        assert_eq!(format!("{}", Qty(2.5)), "2.5");
+    }
 
     #[test]
     fn desk_logs_every_pipeline_stage() {

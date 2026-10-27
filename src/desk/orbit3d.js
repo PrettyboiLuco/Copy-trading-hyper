@@ -12,6 +12,7 @@ import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
 import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
+import { ShaderPass } from "three/addons/postprocessing/ShaderPass.js";
 import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 import { buildAgentModel, buildPad } from "./agents3d.js";
 
@@ -48,9 +49,11 @@ const CONFIG = {
   beamSize: 1.0,
   ringSweepSpeed: 1.6,
   ringSweepArms: 3,
-  bloomStrength: 0.6,
-  bloomRadius: 0.45,
-  bloomThreshold: 0.72,
+  // Bloom only catches cores, edges and comets; no milky veil over the scene.
+  bloomStrength: 0.5,
+  bloomRadius: 0.32,
+  bloomThreshold: 0.85,
+  introSec: 2.8,
   autoRotate: 0.3,
   ambientBeamsPerSec: 7,
   scanEverySec: 3.2,
@@ -306,6 +309,29 @@ export function createOrbit3D(container, opts) {
   const bloomSetSize = bloom.setSize.bind(bloom);
   bloom.setSize = (w, h) => bloomSetSize(Math.max(1, w >> 1), Math.max(1, h >> 1));
   composer.addPass(new OutputPass());
+  // Instrument look on top of the final image: vignette, scanlines, grain and a
+  // touch of chromatic aberration towards the edges (after Codescan's HUD).
+  const hud = new ShaderPass({
+    uniforms: { tDiffuse: { value: null }, uTime: { value: 0 }, uRes: { value: new THREE.Vector2(1, 1) } },
+    vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+    fragmentShader: `
+      uniform sampler2D tDiffuse;
+      uniform float uTime;
+      uniform vec2 uRes;
+      varying vec2 vUv;
+      float hash(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
+      void main() {
+        vec2 d = vUv - 0.5;
+        float r = length(d);
+        vec2 off = d * 0.004 * r;
+        vec3 c = vec3(texture2D(tDiffuse, vUv + off).r, texture2D(tDiffuse, vUv).g, texture2D(tDiffuse, vUv - off).b);
+        c *= mix(1.0, 0.18, smoothstep(0.32, 0.82, r));
+        c *= 0.965 + 0.035 * sin(vUv.y * uRes.y * 1.4);
+        c += (hash(vUv * uRes + fract(uTime) * 91.7) - 0.5) * 0.03;
+        gl_FragColor = vec4(c, 1.0);
+      }`,
+  });
+  composer.addPass(hud);
 
   const col = (hex) => new THREE.Color(hex);
   const materials = []; // every particle material, for shared per-frame uniforms
@@ -340,7 +366,7 @@ export function createOrbit3D(container, opts) {
     hot: CONFIG.coreHot, warm: CONFIG.coreWarm, body: CONFIG.coreBody, deep: CONFIG.coreDeep, hazeFrac: 0.05, bokehProb: 0.3,
   }));
   world.add(core.points);
-  const coreHaze = haze(CONFIG.coreBody, CONFIG.coreHot, 5.2);
+  const coreHaze = haze(CONFIG.coreBody, CONFIG.coreHot, 4.2);
   world.add(coreHaze);
   billboards.push(coreHaze);
   const coreWire = new THREE.LineSegments(
@@ -468,6 +494,7 @@ export function createOrbit3D(container, opts) {
 
   /* ---------- agents: hard-surface models on hex pads ---------- */
   const agents = new Map();
+  const pickMeshes = [];
   opts.agents.forEach((ag, i) => {
     const ang = -Math.PI / 2 - Math.PI / 3 + (i * Math.PI) / 3;
     const c = col(opts.colors[ag.id]);
@@ -486,14 +513,22 @@ export function createOrbit3D(container, opts) {
     }));
     org.u.uBright.value = CONFIG.brightness * 1.6;
     const light = new THREE.PointLight(c, 2, 2.8, 2);
-    g.add(model.root, pad.root, org.points, light);
+    // Invisible, generous hit target for tapping the agent.
+    const pick = new THREE.Mesh(new THREE.SphereGeometry(1.5, 12, 8), new THREE.MeshBasicMaterial({ visible: false }));
+    pick.userData.id = ag.id;
+    pickMeshes.push(pick);
+    g.add(model.root, pad.root, org.points, light, pick);
     world.add(g);
     const el = document.createElement("div");
     el.className = "lab3 ag";
     el.style.setProperty("--c", opts.colors[ag.id]);
     el.innerHTML = `<b>${ag.name}</b><span>–</span>`;
+    el.addEventListener("click", () => setFocus(ag.id));
     labels.appendChild(el);
-    agents.set(ag.id, { g, model, pad, org, light, home, phase: i * 1.1, heat: 0, el, count: el.querySelector("span"), portPos: home.clone() });
+    agents.set(ag.id, {
+      g, model, pad, org, light, home, phase: i * 1.1, heat: 0, warn: 0, index: i, el,
+      count: el.querySelector("span"), portPos: home.clone(),
+    });
   });
 
   /* ---------- pipeline links (faint arcs that light up with traffic) ---------- */
@@ -545,8 +580,27 @@ export function createOrbit3D(container, opts) {
     const el = document.createElement("div");
     el.className = "lab3 sat";
     labels.appendChild(el);
-    return { pivot, body, org, hz, orbitLine, tether, el, r: orbitR, a: rand(0, Math.PI * 2), w: rand(0.12, 0.22), born: performance.now(), size: 0.2, heat: 0 };
+    // Target rings for the source's TP/SL/limit orders on this coin: the closer
+    // the price, the tighter and brighter the ring.
+    const ringGroup = new THREE.Group();
+    world.add(ringGroup);
+    const rings = [0, 1, 2].map(() => {
+      const m = new THREE.Mesh(
+        new THREE.RingGeometry(0.985, 1.0, 96),
+        new THREE.MeshBasicMaterial(additive({ color: 0xffffff, opacity: 0, side: THREE.DoubleSide })),
+      );
+      ringGroup.add(m);
+      return m;
+    });
+    return {
+      pivot, body, org, hz, orbitLine, tether, el, ringGroup, rings, orders: [], pnl: 0,
+      r: orbitR, a: rand(0, Math.PI * 2), w: rand(0.12, 0.22), born: performance.now(), size: 0.2, heat: 0,
+    };
   }
+  // Rings face the camera: undo the world's own tilt before applying the camera's rotation.
+  const invWorldQ = world.quaternion.clone().invert();
+  const ORDER_COLORS = { tp: new THREE.Color(opts.long), sl: new THREE.Color(opts.short), limit: new THREE.Color("#00b0ff") };
+  const PNL_UP = new THREE.Color(opts.long), PNL_DOWN = new THREE.Color(opts.short);
   const tmp = new THREE.Vector3();
   const satWorldPos = (s, out) => out.set(Math.cos(s.a) * s.r, 0, Math.sin(s.a) * s.r).applyEuler(s.pivot.rotation);
 
@@ -709,27 +763,79 @@ export function createOrbit3D(container, opts) {
           shock(s.org, 1);
         }
       }
+      if (a.level === "warn" || a.level === "skip") {
+        const ag = agents.get(a.agent);
+        if (ag) ag.warn = a.level === "warn" ? 1 : 0.6;
+      }
       if (a.agent === "spotter" && a.level === "trade") {
         coreHeat = 1;
         shock(core, 1.3);
         ringU.uPulse.value = 1.5;
         fireScan(opts.colors.spotter);
         setTimeout(() => fireScan(opts.colors.tracker), 260);
+        signalPath(coin);
       }
     }, delay);
+  }
+
+  // One trade as one continuous trail of light: source -> position -> every
+  // agent in pipeline order.
+  function signalPath(coin) {
+    const hops = ["center", ...(coin && sats.has(coin) ? ["sat:" + coin] : []), ...ids];
+    hops.slice(1).forEach((to, i) => {
+      setTimeout(() => {
+        fire(hops[i], to, CONFIG.coreWarm, {
+          power: 1.4, dur: 0.55, trail: 0.55, size: 1.2, lift: 0.5, spray: 0.04,
+          onArrive: () => !to.startsWith("sat:") && to !== "center" && pulseAgent(to, 0.5),
+        });
+      }, i * 300);
+    });
   }
 
   /* ---------- labels ---------- */
   const center = document.createElement("div");
   center.className = "lab3 core";
   labels.appendChild(center);
-  const proj = new THREE.Vector3();
+  const proj = new THREE.Vector3(), wpos = new THREE.Vector3();
   let W = 1, H = 1;
-  function place(el, v, dy = 0) {
-    proj.copy(v).applyMatrix4(world.matrixWorld).project(camera);
-    if (proj.z > 1) return (el.style.display = "none");
-    el.style.display = "";
-    el.style.transform = `translate(-50%, 0) translate(${((proj.x + 1) / 2) * W}px, ${((1 - proj.y) / 2) * H + dy}px)`;
+  const queue = [];
+  // Queue a label at a world-group position; layoutLabels() places them.
+  function place(el, v, dy = 0, prio = 1, alpha = 1) {
+    wpos.copy(v).applyMatrix4(world.matrixWorld);
+    proj.copy(wpos).project(camera);
+    if (proj.z > 1) {
+      el.style.opacity = 0;
+      return;
+    }
+    // Things behind the centre are dimmed so the front of the scene reads first.
+    const behind = camera.position.distanceTo(wpos) > camDist + 1.5;
+    queue.push({ el, x: ((proj.x + 1) / 2) * W, y: ((1 - proj.y) / 2) * H + dy, prio, alpha: alpha * (behind ? 0.45 : 1) });
+  }
+  // Greedy placement: higher priority first; a label that would overlap one
+  // already placed is nudged down/up a line, or hidden if there is no room.
+  function layoutLabels() {
+    queue.sort((a, b) => b.prio - a.prio);
+    const done = [];
+    for (const L of queue) {
+      const w = (L.el._w ??= L.el.offsetWidth), h = (L.el._h ??= L.el.offsetHeight);
+      const x = L.x - w / 2;
+      let y = null;
+      for (const off of [0, h + 2, -(h + 2), 2 * (h + 2)]) {
+        const yy = L.y + off;
+        if (!done.some((r) => x < r.x + r.w && x + w > r.x && yy < r.y + r.h && yy + h > r.y)) {
+          y = yy;
+          break;
+        }
+      }
+      if (y === null) {
+        L.el.style.opacity = 0;
+        continue;
+      }
+      done.push({ x, y, w, h });
+      L.el.style.opacity = L.alpha;
+      L.el.style.transform = `translate(${x}px, ${y}px)`;
+    }
+    queue.length = 0;
   }
 
   /* ---------- sizing ---------- */
@@ -740,12 +846,75 @@ export function createOrbit3D(container, opts) {
     composer.setSize(W, H);
     camera.aspect = W / H;
     // Keep the whole ring in view on narrow screens.
-    const dist = 17.5 * Math.pow(Math.max(1, 1.45 / camera.aspect), 0.72);
-    camera.position.setLength(dist);
+    camDist = 17.5 * Math.pow(Math.max(1, 1.45 / camera.aspect), 0.72);
+    if (introT >= 1 && !focusId) camera.position.setLength(camDist);
     camera.updateProjectionMatrix();
+    hud.uniforms.uRes.value.set(W * pixelRatio, H * pixelRatio);
+    for (const L of labels.children) L._w = L._h = undefined;
   }
+  let camDist = 17.5, introT = reduced ? 1 : 0, focusId = null, returning = false;
   new ResizeObserver(resize).observe(container);
   resize();
+
+  /* ---------- intro: fly in from above while the agents assemble ---------- */
+  const endSph = new THREE.Spherical().setFromVector3(new THREE.Vector3(0, 7.2, 16.5));
+  const sph = new THREE.Spherical();
+  const easeOutBack = (t) => 1 + 2.4 * Math.pow(t - 1, 3) + 1.4 * Math.pow(t - 1, 2);
+  function intro(dt) {
+    introT = Math.min(1, introT + dt / CONFIG.introSec);
+    const e = 1 - Math.pow(1 - introT, 3);
+    sph.set(camDist * (2.1 - 1.1 * e), 0.12 + (endSph.phi - 0.12) * e, endSph.theta - 1.6 * (1 - e));
+    camera.position.setFromSpherical(sph);
+    camera.lookAt(controls.target);
+  }
+  function appear(i) {
+    const t = THREE.MathUtils.clamp((introT * CONFIG.introSec - 0.7 - i * 0.2) / 0.7, 0, 1);
+    return t <= 0 ? 0.001 : t >= 1 ? 1 : Math.max(0.001, easeOutBack(t));
+  }
+
+  /* ---------- focus: tap an agent to fly to it ---------- */
+  const raycaster = new THREE.Raycaster();
+  const ndc = new THREE.Vector2();
+  let down = null;
+  canvas.addEventListener("pointerdown", (e) => (down = { x: e.clientX, y: e.clientY, t: performance.now() }));
+  canvas.addEventListener("pointerup", (e) => {
+    if (!down || introT < 1) return;
+    const moved = Math.hypot(e.clientX - down.x, e.clientY - down.y);
+    if (moved > 8 || performance.now() - down.t > 500) return;
+    const r = canvas.getBoundingClientRect();
+    ndc.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+    raycaster.setFromCamera(ndc, camera);
+    const hit = raycaster.intersectObjects(pickMeshes, false)[0];
+    setFocus(hit ? hit.object.userData.id : null);
+  });
+  function setFocus(id) {
+    if (id === focusId) id = null;
+    if (!id && focusId) returning = true;
+    focusId = id;
+    controls.autoRotate = !id && !reduced;
+    for (const [aid, a] of agents) a.el.classList.toggle("focus", aid === id);
+    opts.onFocus?.(id);
+  }
+  const focusPos = new THREE.Vector3(), focusTarget = new THREE.Vector3(), origin = new THREE.Vector3();
+  function steerCamera(dt) {
+    const k = 1 - Math.exp(-dt * 2.6);
+    if (focusId) {
+      const a = agents.get(focusId);
+      world.localToWorld(focusTarget.copy(a.g.position));
+      // Stand outside the ring, looking past the agent towards the source.
+      focusPos.copy(focusTarget).setY(0).normalize().multiplyScalar(5.2).add(focusTarget);
+      focusPos.y += 2.6;
+      camera.position.lerp(focusPos, k);
+      controls.target.lerp(focusTarget, k);
+    } else if (returning) {
+      controls.target.lerp(origin, k);
+      sph.setFromVector3(camera.position);
+      sph.radius += (camDist - sph.radius) * k;
+      sph.phi += (endSph.phi - sph.phi) * k;
+      camera.position.setFromSpherical(sph);
+      if (Math.abs(sph.radius - camDist) < 0.05 && controls.target.length() < 0.05) returning = false;
+    }
+  }
 
   /* ---------- frame loop ---------- */
   const clock = new THREE.Clock();
@@ -813,6 +982,9 @@ export function createOrbit3D(container, opts) {
     }
     ringU.uTime.value = now;
     ringU.uPulse.value *= Math.exp(-dt * 1.5);
+    hud.uniforms.uTime.value = now;
+    if (introT < 1) intro(dt);
+    else steerCamera(dt);
 
     for (const t of threads) t.rotation.y += t.userData.w * dt * speed;
     for (const b of billboards) b.quaternion.copy(camera.quaternion);
@@ -821,7 +993,7 @@ export function createOrbit3D(container, opts) {
     core.points.rotation.y += dt * 0.12 * speed;
     core.points.rotation.x = Math.sin(now * 0.2) * 0.15;
     stepOrganism(core, dt, coreHeat);
-    coreHaze.material.uniforms.uGlow.value = 0.8 + coreHeat * 0.6;
+    coreHaze.material.uniforms.uGlow.value = 0.6 + coreHeat * 0.6;
     coreHaze.material.uniforms.uTime.value = now;
     coreLight.intensity = 40 + coreHeat * 60;
     coreWire.rotation.y += dt * 0.2;
@@ -839,8 +1011,13 @@ export function createOrbit3D(container, opts) {
       // Beams dock onto the model's port, wherever the model has moved it.
       a.model.port.getWorldPosition(a.portPos);
       world.worldToLocal(a.portPos);
+      a.warn *= Math.exp(-dt * 0.45);
+      a.pad.setWarn(a.warn);
+      const show = appear(a.index);
+      a.g.scale.setScalar(show);
       a.el.classList.toggle("hot", a.heat > 0.25);
-      place(a.el, tmp.set(a.g.position.x, a.g.position.y - 1.35, a.g.position.z), 8);
+      a.el.classList.toggle("warn", a.warn > 0.2);
+      place(a.el, tmp.set(a.g.position.x, a.g.position.y - 1.35, a.g.position.z), 8, 3, Math.min(1, show));
     }
 
     for (const l of links) {
@@ -869,15 +1046,29 @@ export function createOrbit3D(container, opts) {
       s.body.scale.setScalar(s.size * 2.2 * grow);
       s.org.points.rotation.y += dt * 0.5;
       stepOrganism(s.org, dt, s.heat);
-      s.hz.material.uniforms.uGlow.value = 0.35 + s.heat * 0.5;
+      // Glow in profit/loss colour, stronger and beating the further it runs.
+      const pnlK = Math.min(1, Math.abs(s.pnl) * 25);
+      s.hz.material.uniforms.uWarm.value.copy(s.pnl >= 0 ? PNL_UP : PNL_DOWN);
+      s.hz.material.uniforms.uGlow.value = 0.3 + s.heat * 0.5 + pnlK * (0.35 + 0.2 * Math.sin(now * 4));
+      s.ringGroup.position.copy(tmp);
+      s.ringGroup.quaternion.copy(invWorldQ).multiply(camera.quaternion);
+      s.rings.forEach((m, i) => {
+        const o = s.orders[i];
+        if (!o) return (m.material.opacity = 0);
+        const near = 1 - Math.min(1, o.pct / 6);
+        m.scale.setScalar(0.35 + s.size * 2 + (1 - near) * 1.4);
+        m.material.color.copy(ORDER_COLORS[o.kind]);
+        m.material.opacity = 0.2 + near * 0.55 + (o.pct < 1 ? 0.25 * Math.sin(now * 10) : 0);
+      });
       const tp = s.tether.geometry.attributes.position.array;
       tp[3] = tmp.x; tp[4] = tmp.y; tp[5] = tmp.z;
       s.tether.geometry.attributes.position.needsUpdate = true;
       s.tether.material.opacity = 0.1 + s.heat * 0.45;
-      place(s.el, tmp, -16 - s.size * 40);
+      place(s.el, tmp, -16 - s.size * 40, 1);
       s.el.dataset.coin = coin;
     }
-    place(center, P.set(0, -2.1, 0));
+    place(center, P.set(0, -2.1, 0), 0, 2);
+    layoutLabels();
 
     scanClock += dt;
     if (scanClock > CONFIG.scanEverySec) {
@@ -955,6 +1146,10 @@ export function createOrbit3D(container, opts) {
     stats() {
       return { fps: Math.round(fps), mode, pixelRatio: +pixelRatio.toFixed(2), bloom: bloom.enabled };
     },
+    /** Fly to an agent (or back to the overview with null). */
+    focus(id) {
+      setFocus(id);
+    },
     sync(state, fresh) {
       const maxV = Math.max(1, ...state.target.positions.map((p) => p.value));
       const keep = new Set();
@@ -972,12 +1167,33 @@ export function createOrbit3D(container, opts) {
         }
         s.long = long;
         s.size = 0.1 + 0.2 * Math.sqrt(p.value / maxV);
-        s.el.innerHTML = `<b style="color:${long ? opts.long : opts.short}">${p.coin} ${long ? "▲" : "▼"}</b>`;
+        s.pnl = p.value ? p.upnl / p.value : 0;
+        const fmt = opts.fmtUsd || ((v) => v.toFixed(0));
+        const html = `<b style="color:${long ? opts.long : opts.short}">${p.coin} ${long ? "▲" : "▼"}</b>` +
+          `<span>${fmt(p.value)} · <i style="color:${p.upnl >= 0 ? opts.long : opts.short}">${p.upnl >= 0 ? "+" : ""}${fmt(p.upnl)}</i></span>`;
+        if (s.el._html !== html) {
+          s.el.innerHTML = s.el._html = html;
+          s.el._w = s.el._h = undefined;
+        }
+        // Up to three nearest orders of the source on this coin.
+        s.orders = state.target.orders
+          .filter((o) => o.coin === p.coin)
+          .map((o) => {
+            const level = o.trigger_px ?? o.limit_px;
+            const mark = o.mark ?? level;
+            const kind = /take profit/i.test(o.order_type) ? "tp" : /stop/i.test(o.order_type) ? "sl" : "limit";
+            return { kind, pct: mark ? Math.abs(level / mark - 1) * 100 : 99 };
+          })
+          .sort((a, b) => a.pct - b.pct)
+          .slice(0, 3);
       }
       for (const k of [...sats.keys()]) if (!keep.has(k)) dropSat(k);
       for (const a of state.agents) {
         const ag = agents.get(a.id);
-        if (ag) ag.count.textContent = String(a.count);
+        if (ag && ag.count.textContent !== String(a.count)) {
+          ag.count.textContent = String(a.count);
+          ag.el._w = ag.el._h = undefined;
+        }
       }
       const short = state.wallet ? state.wallet.slice(0, 6) + "…" + state.wallet.slice(-4) : "–";
       center.innerHTML = `<span>SIGNALQUELLE</span><b>${short}</b>`;
@@ -988,7 +1204,11 @@ export function createOrbit3D(container, opts) {
   function dropSat(coin) {
     const s = sats.get(coin);
     if (!s) return;
-    world.remove(s.pivot, s.tether);
+    world.remove(s.pivot, s.tether, s.ringGroup);
+    for (const m of s.rings) {
+      m.geometry.dispose();
+      m.material.dispose();
+    }
     const i = materials.indexOf(s.org.u);
     if (i >= 0) materials.splice(i, 1);
     billboards.splice(billboards.indexOf(s.hz), 1);

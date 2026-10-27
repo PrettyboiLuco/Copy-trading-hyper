@@ -363,7 +363,7 @@ export function buildPad(color) {
   g.add(new THREE.Mesh(hexGeo, darkMetal()));
   const edge = new THREE.LineSegments(new THREE.EdgesGeometry(hexGeo), glowLine(color, 1.6));
   g.add(edge);
-  const u = { uTime: { value: 0 }, uActive: { value: 0 }, uProgress: { value: 0 }, uColor: { value: new THREE.Color(color) } };
+  const u = { uTime: { value: 0 }, uActive: { value: 0 }, uProgress: { value: 0 }, uWarn: { value: 0 }, uColor: { value: new THREE.Color(color) } };
   const ring = new THREE.Mesh(
     new THREE.RingGeometry(0.88, 0.96, 128, 1),
     new THREE.ShaderMaterial({
@@ -372,16 +372,19 @@ export function buildPad(color) {
       vertexShader: `varying vec2 vP; void main(){ vP = position.xy; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
       fragmentShader: `
         precision highp float;
-        uniform float uTime, uActive, uProgress;
+        uniform float uTime, uActive, uProgress, uWarn;
         uniform vec3 uColor;
         varying vec2 vP;
         void main() {
           float a = atan(vP.y, vP.x) / 6.28318 + 0.5;
-          float seg = fract(a * 36.0 - uTime * (0.08 + uActive * 0.6));
+          float seg = fract(a * 36.0 - uTime * (0.08 + uActive * 0.6 + uWarn * 1.2));
           float dash = smoothstep(0.0, 0.06, seg) * smoothstep(0.66, 0.58, seg);
           float arc = step(a, uProgress) * uActive;
-          float k = 0.12 + dash * (0.35 + uActive * 0.9) + arc * 1.8;
-          gl_FragColor = vec4(uColor * k, 1.0);
+          // Warning: the ring turns red and beats.
+          float beat = uWarn * (0.6 + 0.4 * sin(uTime * 12.0));
+          vec3 col = mix(uColor, vec3(1.0, 0.1, 0.18), clamp(uWarn * 1.5, 0.0, 1.0));
+          float k = 0.12 + dash * (0.35 + uActive * 0.9 + beat) + arc * 1.8 + beat * 0.5;
+          gl_FragColor = vec4(col * k, 1.0);
         }`,
     }),
   );
@@ -419,6 +422,9 @@ export function buildPad(color) {
     },
     start() {
       progressT = 0;
+    },
+    setWarn(v) {
+      u.uWarn.value = v;
     },
   };
 }
