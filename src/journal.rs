@@ -13,7 +13,8 @@ pub struct Journal {
 }
 
 impl Journal {
-    const HEADER: &'static str = "timestamp,coin,side,size,price,notional,fee,realized_pnl,equity_after";
+    const HEADER: &'static str =
+        "timestamp,coin,side,size,price,notional,fee,realized_pnl,equity_after";
 
     pub fn open(path: &Path) -> Result<Self> {
         if !path.exists() {

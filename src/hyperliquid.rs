@@ -41,11 +41,20 @@ impl HyperliquidClient {
     }
 }
 
+impl HyperliquidClient {
+    pub fn clearinghouse_state(&self, wallet: &str) -> Result<ClearinghouseState> {
+        self.info(json!({ "type": "clearinghouseState", "user": wallet }))
+    }
+
+    /// Resting orders of the wallet, including TP/SL trigger orders.
+    pub fn open_orders(&self, wallet: &str) -> Result<Vec<OpenOrder>> {
+        self.info(json!({ "type": "frontendOpenOrders", "user": wallet }))
+    }
+}
+
 impl MarketSource for HyperliquidClient {
     fn target_snapshot(&mut self, wallet: &str) -> Result<AccountSnapshot> {
-        let state: ClearinghouseState =
-            self.info(json!({ "type": "clearinghouseState", "user": wallet }))?;
-        parse_clearinghouse_state(state)
+        parse_clearinghouse_state(self.clearinghouse_state(wallet)?)
     }
 
     fn mids(&mut self) -> Result<Mids> {
@@ -78,6 +87,81 @@ pub struct AssetPosition {
 pub struct RawPosition {
     pub coin: String,
     pub szi: String,
+    pub entry_px: Option<String>,
+    pub position_value: Option<String>,
+    pub unrealized_pnl: Option<String>,
+    pub liquidation_px: Option<String>,
+    pub leverage: Option<Leverage>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Leverage {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub value: f64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenOrder {
+    pub coin: String,
+    /// "B" = bid/buy, "A" = ask/sell.
+    pub side: String,
+    pub limit_px: String,
+    pub sz: String,
+    pub oid: u64,
+    pub timestamp: u64,
+    #[serde(default)]
+    pub order_type: String,
+    #[serde(default)]
+    pub reduce_only: bool,
+    #[serde(default)]
+    pub is_trigger: bool,
+    #[serde(default)]
+    pub trigger_px: String,
+    #[serde(default)]
+    pub is_position_tpsl: bool,
+}
+
+/// Open position with the details shown by `watch` / `status`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PositionInfo {
+    pub coin: String,
+    pub size: f64,
+    pub entry_px: f64,
+    pub position_value: f64,
+    pub unrealized_pnl: f64,
+    pub liquidation_px: Option<f64>,
+    pub leverage: Option<String>,
+}
+
+fn num(v: &Option<String>) -> f64 {
+    v.as_deref().and_then(|s| s.parse().ok()).unwrap_or(0.0)
+}
+
+pub fn position_details(state: &ClearinghouseState) -> Vec<PositionInfo> {
+    let mut out: Vec<PositionInfo> = state
+        .asset_positions
+        .iter()
+        .map(|ap| &ap.position)
+        .filter_map(|p| {
+            let size: f64 = p.szi.parse().ok()?;
+            (size != 0.0).then(|| PositionInfo {
+                coin: p.coin.clone(),
+                size,
+                entry_px: num(&p.entry_px),
+                position_value: num(&p.position_value),
+                unrealized_pnl: num(&p.unrealized_pnl),
+                liquidation_px: p.liquidation_px.as_deref().and_then(|s| s.parse().ok()),
+                leverage: p
+                    .leverage
+                    .as_ref()
+                    .map(|l| format!("{}x {}", l.value, l.kind)),
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| b.position_value.total_cmp(&a.position_value));
+    out
 }
 
 pub fn parse_clearinghouse_state(state: ClearinghouseState) -> Result<AccountSnapshot> {
@@ -139,6 +223,34 @@ mod tests {
         assert_eq!(snap.positions.len(), 2);
         assert_eq!(snap.positions["BTC"], 0.5);
         assert_eq!(snap.positions["ETH"], -2.25);
+    }
+
+    #[test]
+    fn parses_position_details_and_open_orders() {
+        let body = r#"{
+            "marginSummary": {"accountValue": "5000"},
+            "assetPositions": [
+                {"type": "oneWay", "position": {"coin": "ETH", "szi": "-2", "entryPx": "3000", "positionValue": "5800",
+                 "unrealizedPnl": "200", "liquidationPx": null, "leverage": {"type": "isolated", "value": 3}}},
+                {"type": "oneWay", "position": {"coin": "BTC", "szi": "0.1", "entryPx": "60000", "positionValue": "6200",
+                 "unrealizedPnl": "200", "liquidationPx": "41000.5", "leverage": {"type": "cross", "value": 20}}}
+            ]
+        }"#;
+        let state: ClearinghouseState = serde_json::from_str(body).unwrap();
+        let pos = position_details(&state);
+        assert_eq!(pos[0].coin, "BTC");
+        assert_eq!(pos[0].liquidation_px, Some(41000.5));
+        assert_eq!(pos[0].leverage.as_deref(), Some("20x cross"));
+        assert_eq!(pos[1].size, -2.0);
+        assert_eq!(pos[1].liquidation_px, None);
+
+        let orders: Vec<OpenOrder> = serde_json::from_str(r#"[
+            {"coin": "BTC", "side": "A", "limitPx": "70000", "sz": "0.1", "oid": 42, "timestamp": 1700000000000,
+             "origSz": "0.1", "orderType": "Take Profit Market", "reduceOnly": true, "isTrigger": true,
+             "triggerPx": "70000", "triggerCondition": "Price above 70000", "isPositionTpsl": true, "children": [], "tif": null, "cloid": null}
+        ]"#).unwrap();
+        assert_eq!(orders[0].order_type, "Take Profit Market");
+        assert!(orders[0].reduce_only && orders[0].is_trigger);
     }
 
     #[test]

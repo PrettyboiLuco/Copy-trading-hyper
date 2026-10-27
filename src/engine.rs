@@ -145,14 +145,20 @@ impl CopyEngine {
 
         let mut orders = Vec::new();
         for coin in coins {
-            let Some(&mid) = mids.get(&coin) else { continue };
+            let Some(&mid) = mids.get(&coin) else {
+                continue;
+            };
             let current = self.account.size(&coin);
             let want = desired.get(&coin).copied().unwrap_or(0.0);
 
             // Target closed the coin: always close fully, regardless of size.
             if want == 0.0 && !self.ignored.contains_key(&coin) {
                 if current != 0.0 {
-                    orders.push(OrderIntent { coin, delta: -current, mid });
+                    orders.push(OrderIntent {
+                        coin,
+                        delta: -current,
+                        mid,
+                    });
                 }
                 continue;
             }
@@ -302,7 +308,10 @@ mod tests {
         // Target closes BTC, then reopens it -> now copied.
         e.plan(&AccountSnapshot::new(100_000.0, &[("ETH", 5.0)]), &px);
         assert!(e.ignored_coins().is_empty());
-        let orders = e.plan(&AccountSnapshot::new(100_000.0, &[("BTC", 1.0), ("ETH", 5.0)]), &px);
+        let orders = e.plan(
+            &AccountSnapshot::new(100_000.0, &[("BTC", 1.0), ("ETH", 5.0)]),
+            &px,
+        );
         assert!(orders.iter().any(|o| o.coin == "BTC"));
     }
 

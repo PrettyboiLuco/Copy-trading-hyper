@@ -21,10 +21,16 @@ fn demo_scenario_mirrors_target() {
             assert_eq!(mine.signum(), size.signum(), "{coin} direction");
             let ratio = mine / size;
             let expected = report.equity / step.target.account_value;
-            assert!((ratio / expected - 1.0).abs() < 0.1, "{coin} size off: {ratio} vs {expected}");
+            assert!(
+                (ratio / expected - 1.0).abs() < 0.1,
+                "{coin} size off: {ratio} vs {expected}"
+            );
         }
         for coin in engine.account.positions.keys() {
-            assert!(step.target.positions.contains_key(coin), "stale position {coin}");
+            assert!(
+                step.target.positions.contains_key(coin),
+                "stale position {coin}"
+            );
         }
     }
 
@@ -34,4 +40,3 @@ fn demo_scenario_mirrors_target() {
     assert!(engine.account.fees_paid > 0.0);
     assert!(source.target_snapshot(DEFAULT_TARGET_WALLET).is_err());
 }
-

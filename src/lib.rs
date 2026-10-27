@@ -11,6 +11,7 @@ pub mod mock;
 pub mod paper;
 pub mod source;
 pub mod types;
+pub mod ws;
 
 /// Wallet followed by default in test runs.
 pub const DEFAULT_TARGET_WALLET: &str = "0x0c1f6941FDcDe9488DfD36cA16FeD6B3bc49672B";

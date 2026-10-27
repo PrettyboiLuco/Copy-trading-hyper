@@ -10,7 +10,29 @@ Der Bot folgt standardmäßig der Wallet
 und spiegelt deren Perp-Positionen auf ein simuliertes Konto. Es werden **keine echten Orders**
 gesendet und **kein Private Key** benötigt – es wird nur die öffentliche `/info`-API gelesen.
 
-## Funktionsweise
+## Trades der Wallet live verfolgen
+
+```bash
+cargo run --release -- watch
+cargo run --release -- watch --log ziel_trades.csv   # zusätzlich als CSV mitschreiben
+```
+
+Zeigt zuerst alle **offenen Positionen** (Größe, Einstieg, Wert, uPnL, Hebel, Liquidationspreis)
+und **offenen Orders** (Limit, TP/SL, reduce-only). Danach wird jeder neue Trade sofort gemeldet,
+z. B.:
+
+```
+[14:03:21] TARGET OPEN LONG     BTC       +0.5000 @ 65000   (32500.00 USDC) -> position +0.5000
+[14:20:02] TARGET REDUCE LONG   BTC       -0.2000 @ 66100   (13220.00 USDC) -> position +0.3000  closed PnL +220.00
+[14:21:40] TARGET order open    SELL ETH 4 @ 3400 (oid 123456)
+```
+
+Technik: Snapshot per REST (`clearinghouseState`, `frontendOpenOrders`), danach WebSocket
+`wss://api.hyperliquid.xyz/ws` mit den Subscriptions `userFills` (Ausführungen, Teil-Fills einer
+Order werden zusammengefasst) und `orderUpdates` (neue/stornierte/ausgelöste Orders).
+Automatischer Reconnect, Ping alle 30 s, funktioniert auch hinter einem HTTPS-Proxy (`HTTPS_PROXY`, `SSL_CERT_FILE`).
+
+## Funktionsweise des Copy-Bots
 
 Alle `--interval` Sekunden:
 
@@ -24,6 +46,9 @@ Alle `--interval` Sekunden:
    (inkl. Taker-Fee). Orders unter `--min-order-usd` und Mini-Rebalances unter
    `--rebalance-threshold` werden übersprungen; schließt das Ziel einen Coin, wird immer komplett geschlossen.
 
+Zusätzlich zum Polling hört `run` auf den WebSocket-Feed: Sobald die Wallet tradet, wird sofort
+synchronisiert statt bis zum nächsten Intervall zu warten (abschaltbar mit `--no-ws`).
+
 Der Kontostand wird in `paper_state.json` gespeichert (Neustart setzt fort), jede simulierte
 Ausführung landet in `trades.csv`.
 
@@ -36,7 +61,7 @@ cargo test
 # Offline-Demo-Szenario (kein Netzwerk nötig)
 cargo run -- simulate
 
-# Aktuelle Positionen der Wallet anzeigen
+# Offene Positionen und Orders der Wallet einmalig anzeigen
 cargo run -- status
 
 # Live folgen & Paper-traden (1000 USDC Startkapital, max. 5x Hebel)
@@ -57,6 +82,7 @@ Alle Optionen: `cargo run -- run --help`. Neu starten mit frischem Konto: `paper
 | Datei | Inhalt |
 |---|---|
 | `src/hyperliquid.rs` | Read-only Client für die Hyperliquid Info-API |
+| `src/ws.rs` | WebSocket-Live-Feed (Trades + Orders der Wallet), Reconnect, Proxy |
 | `src/engine.rs` | Copy-Logik: Sizing, Limits, Order-Planung |
 | `src/paper.rs` | Simuliertes Konto: Fills, Fees, Slippage, PnL |
 | `src/mock.rs` | Skript-basierte Offline-Datenquelle + Demo-Szenario |
@@ -68,4 +94,4 @@ Alle Optionen: `cargo run -- run --help`. Neu starten mit frischem Konto: `paper
 - Ausführung zum Mid-Preis ± fixer Slippage, keine Orderbuch-Tiefe
 - Funding-Zahlungen und Liquidationen werden nicht simuliert
 - Nur Perps (Haupt-DEX), kein Spot
-- Polling-basiert: Trades zwischen zwei Abfragen werden verzögert kopiert
+- Kopiert wird zum Mid-Preis im Moment der Erkennung, nicht zum Ausführungspreis der Wallet
