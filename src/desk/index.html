@@ -107,6 +107,11 @@ header { display: flex; align-items: center; gap: 14px; padding: 8px 12px; borde
 .ov.bl { bottom: 10px; left: 12px; } .ov.br { bottom: 10px; right: 12px; text-align: right; }
 .ov .lbl { font-size: 9.5px; letter-spacing: .12em; color: var(--muted); text-transform: uppercase; }
 .ov .val { font-size: 20px; font-weight: 800; }
+.ov.br { display: flex; align-items: center; gap: 10px; }
+#qBtn { pointer-events: auto; font: inherit; font-size: 9.5px; letter-spacing: .1em; padding: 4px 9px; border-radius: 999px;
+  cursor: pointer; color: var(--text); background: rgba(0, 0, 0, .7); border: 1px solid var(--line-2); }
+#qBtn.max { color: var(--source); border-color: var(--source); }
+#qBtn:focus-visible { outline: 2px solid var(--source); outline-offset: 2px; }
 .legend { display: flex; gap: 10px; font-size: 9.5px; color: var(--muted); }
 .legend i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; vertical-align: -1px; }
 
@@ -196,7 +201,7 @@ footer { margin-top: 10px; display: flex; justify-content: space-between; gap: 1
   .hide-sm { display: none; }
   .lab3.ag { gap: 5px; padding: 2px 6px; }
   .lab3.ag b, .lab3.ag span { font-size: 7.5px; letter-spacing: .08em; }
-  .ov.br { display: none; }
+  #oLast { display: none; }
 }
 </style>
 </head>
@@ -259,7 +264,7 @@ footer { margin-top: 10px; display: flex; justify-content: space-between; gap: 1
       <div class="ov tl"><div class="lbl" style="color:var(--source)">Signalquelle</div><div class="val" id="oTV">–</div><div class="lbl" id="oTN">–</div></div>
       <div class="ov tr"><div class="lbl">Wir</div><div class="val" id="oEq">–</div><div class="lbl" id="oScale">–</div></div>
       <div class="ov bl legend"><span><i style="background:var(--long)"></i>Long</span><span><i style="background:var(--short)"></i>Short</span><span class="hide-sm">● Satellit = Position der Signalquelle · ziehen zum Drehen</span></div>
-      <div class="ov br lbl" id="oLast">–</div>
+      <div class="ov br"><span class="lbl" id="oLast">–</span><button type="button" id="qBtn" hidden>QUALITÄT AUTO</button></div>
     </div>
 
     <div class="panel" id="target">
@@ -721,7 +726,17 @@ function frame(now) {
 }
 
 /* ---------------- wiring ---------------- */
+// Quality chip: mode plus the frame rate the device actually reaches.
+function qualityLabel() {
+  if (!orbit3d) return;
+  const st = orbit3d.stats();
+  const q = $("qBtn");
+  q.textContent = `QUALITÄT ${st.mode === "max" ? "MAX" : "AUTO"} · ${st.fps || "–"} FPS`;
+  q.classList.toggle("max", st.mode === "max");
+  q.title = `Auflösung ×${st.pixelRatio} · Leuchten ${st.bloom ? "an" : "aus"} – tippen zum Umschalten`;
+}
 function clock() {
+  qualityLabel();
   const d = new Date();
   $("clock").textContent = d.toISOString().slice(11, 19);
   $("clockSub").textContent = "UTC · lokal " + d.toLocaleTimeString("de-DE", { hour12: false });
@@ -783,7 +798,19 @@ function connect() {
 }
 renderFilters(); resize(); addEventListener("resize", resize);
 import("./orbit3d.js").then((m) => {
-  orbit3d = m.createOrbit3D($("orbitP"), { agents: AGENTS, colors: COLOR, long: LONG, short: SHORT, flow: FLOW });
+  let quality = "auto";
+  try { quality = localStorage.getItem("desk-quality") || "auto"; } catch (e) {}
+  orbit3d = m.createOrbit3D($("orbitP"), { agents: AGENTS, colors: COLOR, long: LONG, short: SHORT, flow: FLOW, quality });
+  const q = $("qBtn");
+  if (orbit3d) {
+    q.hidden = false;
+    q.addEventListener("click", () => {
+      quality = orbit3d.stats().mode === "max" ? "auto" : "max";
+      orbit3d.setQuality(quality);
+      try { localStorage.setItem("desk-quality", quality); } catch (e) {}
+      qualityLabel();
+    });
+  }
   if (!orbit3d) return;
   tc.style.display = oc.style.display = "none";
   if (S) orbit3d.sync(S, []);

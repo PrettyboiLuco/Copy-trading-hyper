@@ -57,10 +57,15 @@ const CONFIG = {
 };
 
 const POOL = CONFIG.maxBeams;
-// Adaptive quality: pixel-ratio multipliers tried in turn while frames are slow;
-// the last step also turns bloom off.
-const QUALITY = [1, 0.8, 0.65, 0.5];
-const TARGET_FPS = 40;
+// Adaptive quality ("auto" mode): pixel-ratio multipliers stepped down while
+// frames are really slow and back up when there is headroom; the last step
+// also turns bloom off. Thresholds sit below 30 fps on purpose: iOS caps
+// animation in embedded frames at 30 fps, which is smooth, not a slow GPU.
+const QUALITY = [1, 0.85, 0.7, 0.55];
+const DOWN_FPS = 26;
+const UP_FPS = 52;
+// Highest pixel ratio we render at (3 = full iPhone Retina).
+const MAX_PIXEL_RATIO = 3;
 
 const additive = (opts) => ({ transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, ...opts });
 const rand = (a, b) => a + Math.random() * (b - a);
@@ -240,7 +245,7 @@ export function createOrbit3D(container, opts) {
   canvas.className = "orbit3d";
   let renderer;
   try {
-    // No MSAA: bloom softens edges anyway and the composer would not use it.
+    // Antialiasing happens in the composer's multisampled target instead.
     renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: "high-performance" });
   } catch (e) {
     console.warn("WebGL nicht verfügbar", e);
@@ -250,8 +255,12 @@ export function createOrbit3D(container, opts) {
   const coarse = matchMedia("(pointer: coarse)").matches;
   const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
   const q = mobile ? CONFIG.mobileScale : 1;
-  const basePixelRatio = Math.min(devicePixelRatio || 1, mobile ? 1.25 : 1.5);
-  let pixelRatio = basePixelRatio;
+  const fullPixelRatio = Math.min(devicePixelRatio || 1, MAX_PIXEL_RATIO);
+  // "auto" starts a notch below full resolution on phones; "max" never lowers it.
+  let mode = opts.quality === "max" ? "max" : "auto";
+  const autoBase = mobile ? Math.min(fullPixelRatio, 2.5) : Math.min(fullPixelRatio, 2);
+  const basePixelRatio = () => (mode === "max" ? fullPixelRatio : autoBase);
+  let pixelRatio = basePixelRatio();
   renderer.setPixelRatio(pixelRatio);
   renderer.setClearColor(CONFIG.background);
   // Neutral keeps hue and saturation where ACES would bleach strong colours.
@@ -285,7 +294,11 @@ export function createOrbit3D(container, opts) {
   // On phones a drag must keep scrolling the page.
   controls.enabled = !coarse;
 
-  const composer = new EffectComposer(renderer);
+  // Multisampled HDR target: smooth edges on the chrome models, room for bloom.
+  const composer = new EffectComposer(
+    renderer,
+    new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples: renderer.capabilities.isWebGL2 ? 4 : 0 }),
+  );
   composer.addPass(new RenderPass(scene, camera));
   const bloom = new UnrealBloomPass(new THREE.Vector2(256, 256), CONFIG.bloomStrength, CONFIG.bloomRadius, CONFIG.bloomThreshold);
   composer.addPass(bloom);
@@ -750,7 +763,14 @@ export function createOrbit3D(container, opts) {
 
   let visible = true;
   new IntersectionObserver(([e]) => (visible = e.isIntersecting)).observe(container);
-  let level = 0, sampleT = 0, sampleN = 0, settle = 0;
+  let level = 0, sampleT = 0, sampleN = 0, settle = 0, fast = 0, fps = 0;
+  function applyQuality() {
+    pixelRatio = basePixelRatio() * QUALITY[level];
+    renderer.setPixelRatio(pixelRatio);
+    ringU.uPixelRatio.value = pixelRatio;
+    resize();
+    bloom.enabled = level < QUALITY.length - 1;
+  }
   function adapt(rawDt) {
     // Ignore the first seconds (shader compile) and long pauses (tab switch).
     if (settle < 2 || rawDt > 0.5) {
@@ -760,15 +780,19 @@ export function createOrbit3D(container, opts) {
     sampleT += rawDt;
     sampleN++;
     if (sampleT < 2) return;
-    const fps = sampleN / sampleT;
+    fps = sampleN / sampleT;
     sampleT = sampleN = 0;
-    if (fps < TARGET_FPS && level < QUALITY.length - 1) {
+    if (mode !== "auto") return;
+    if (fps < DOWN_FPS && level < QUALITY.length - 1) {
       level++;
-      pixelRatio = basePixelRatio * QUALITY[level];
-      renderer.setPixelRatio(pixelRatio);
-      ringU.uPixelRatio.value = pixelRatio;
-      resize();
-      bloom.enabled = level < QUALITY.length - 1;
+      fast = 0;
+      applyQuality();
+      settle = 1;
+    } else if (fps > UP_FPS && level > 0 && ++fast >= 3) {
+      // Six seconds of headroom: try one step better.
+      level--;
+      fast = 0;
+      applyQuality();
       settle = 1;
     }
   }
@@ -920,6 +944,17 @@ export function createOrbit3D(container, opts) {
   requestAnimationFrame(frame);
 
   return {
+    /** "auto" adapts to the device, "max" always renders at full resolution with bloom. */
+    setQuality(m) {
+      mode = m === "max" ? "max" : "auto";
+      level = 0;
+      fast = 0;
+      settle = 1;
+      applyQuality();
+    },
+    stats() {
+      return { fps: Math.round(fps), mode, pixelRatio: +pixelRatio.toFixed(2), bloom: bloom.enabled };
+    },
     sync(state, fresh) {
       const maxV = Math.max(1, ...state.target.positions.map((p) => p.value));
       const keep = new Set();
