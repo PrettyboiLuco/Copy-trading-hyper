@@ -12,6 +12,23 @@ use anyhow::{Context, Result};
 
 const PAGE: &str = include_str!("index.html");
 
+/// Scripts served next to the page, so the desk works without internet.
+const SCRIPTS: &[(&str, &str)] = &[
+    ("/orbit3d.js", include_str!("orbit3d.js")),
+    ("/vendor/three.module.min.js", include_str!("vendor/three.module.min.js")),
+    ("/vendor/addons/controls/OrbitControls.js", include_str!("vendor/addons/controls/OrbitControls.js")),
+    ("/vendor/addons/postprocessing/EffectComposer.js", include_str!("vendor/addons/postprocessing/EffectComposer.js")),
+    ("/vendor/addons/postprocessing/MaskPass.js", include_str!("vendor/addons/postprocessing/MaskPass.js")),
+    ("/vendor/addons/postprocessing/OutputPass.js", include_str!("vendor/addons/postprocessing/OutputPass.js")),
+    ("/vendor/addons/postprocessing/Pass.js", include_str!("vendor/addons/postprocessing/Pass.js")),
+    ("/vendor/addons/postprocessing/RenderPass.js", include_str!("vendor/addons/postprocessing/RenderPass.js")),
+    ("/vendor/addons/postprocessing/ShaderPass.js", include_str!("vendor/addons/postprocessing/ShaderPass.js")),
+    ("/vendor/addons/postprocessing/UnrealBloomPass.js", include_str!("vendor/addons/postprocessing/UnrealBloomPass.js")),
+    ("/vendor/addons/shaders/CopyShader.js", include_str!("vendor/addons/shaders/CopyShader.js")),
+    ("/vendor/addons/shaders/LuminosityHighPassShader.js", include_str!("vendor/addons/shaders/LuminosityHighPassShader.js")),
+    ("/vendor/addons/shaders/OutputShader.js", include_str!("vendor/addons/shaders/OutputShader.js")),
+];
+
 #[derive(Default)]
 struct Inner {
     latest: String,
@@ -80,7 +97,10 @@ fn handle(mut stream: TcpStream, hub: &Hub) -> Result<()> {
         "/" | "/index.html" => respond(&mut stream, "200 OK", "text/html; charset=utf-8", PAGE),
         "/state" => respond(&mut stream, "200 OK", "application/json", &hub.latest()),
         "/events" => stream_events(stream, hub),
-        _ => respond(&mut stream, "404 Not Found", "text/plain", "not found"),
+        _ => match SCRIPTS.iter().find(|(p, _)| *p == path) {
+            Some((_, body)) => respond(&mut stream, "200 OK", "text/javascript; charset=utf-8", body),
+            None => respond(&mut stream, "404 Not Found", "text/plain", "not found"),
+        },
     }
 }
 

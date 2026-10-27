@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Hyper Copy Desk</title>
+<script type="importmap">{"imports":{"three":"./vendor/three.module.min.js","three/addons/":"./vendor/addons/"}}</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700;800&display=swap" rel="stylesheet">
 <style>
@@ -86,6 +87,16 @@ header { display: flex; align-items: center; gap: 14px; padding: 8px 12px; borde
 
 /* orbit */
 #orbitP canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+#orbitP canvas.orbit3d { cursor: grab; }
+#orbitP canvas.orbit3d:active { cursor: grabbing; }
+.labels3d { position: absolute; inset: 0; pointer-events: none; z-index: 1; overflow: hidden; }
+.lab3 { position: absolute; left: 0; top: 0; text-align: center; white-space: nowrap; font-size: 9px; color: var(--muted);
+  letter-spacing: .08em; text-shadow: 0 0 6px #000, 0 0 2px #000; will-change: transform; }
+.lab3 b { display: block; font-size: 10px; letter-spacing: .12em; }
+.lab3.ag b { color: #e9eef6; transition: color .3s, text-shadow .3s; }
+.lab3.ag.hot b { color: var(--c); text-shadow: 0 0 10px var(--c); }
+.lab3.core span { font-size: 8.5px; letter-spacing: .2em; }
+.lab3.core b { color: #fff; font-size: 11px; }
 .ov { position: absolute; z-index: 2; pointer-events: none; }
 .ov.tl { top: 10px; left: 12px; } .ov.tr { top: 10px; right: 12px; text-align: right; }
 .ov.bl { bottom: 10px; left: 12px; } .ov.br { bottom: 10px; right: 12px; text-align: right; }
@@ -240,7 +251,7 @@ footer { margin-top: 10px; display: flex; justify-content: space-between; gap: 1
       <canvas id="trail"></canvas><canvas id="orbit"></canvas>
       <div class="ov tl"><div class="lbl">Wallet-Konto</div><div class="val" id="oTV">–</div><div class="lbl" id="oTN">–</div></div>
       <div class="ov tr"><div class="lbl">Wir</div><div class="val" id="oEq">–</div><div class="lbl" id="oScale">–</div></div>
-      <div class="ov bl legend"><span><i style="background:var(--long)"></i>Long</span><span><i style="background:var(--short)"></i>Short</span><span class="hide-sm">● Satellit = Position der Wallet</span></div>
+      <div class="ov bl legend"><span><i style="background:var(--long)"></i>Long</span><span><i style="background:var(--short)"></i>Short</span><span class="hide-sm">● Satellit = Position der Wallet · ziehen zum Drehen</span></div>
       <div class="ov br lbl" id="oLast">–</div>
     </div>
 
@@ -575,7 +586,15 @@ function agentPos(id) {
   const ang = -Math.PI / 2 - Math.PI / 3 + i * Math.PI / 3;
   return [g.cx + Math.cos(ang) * g.rx, g.cy + Math.sin(ang) * g.ry];
 }
+let orbit3d = null;
 function orbitSync(s, first) {
+  if (orbit3d) {
+    const fresh = first ? [] : s.activity.filter(a => a.seq > lastSeq).reverse().slice(-16);
+    orbit3d.sync(s, fresh);
+    if (s.activity.length) lastSeq = Math.max(lastSeq, s.activity[0].seq);
+    $("oLast").textContent = s.activity[0] ? "LETZTER SCHRITT · " + (AGENTS.find(x => x.id === s.activity[0].agent)?.name || "") : "–";
+    return;
+  }
   // satellites for target positions
   const maxV = Math.max(1, ...s.target.positions.map(q => q.value));
   const keep = new Set();
@@ -599,6 +618,7 @@ function orbitSync(s, first) {
   $("oLast").textContent = s.activity[0] ? "LETZTER SCHRITT · " + (AGENTS.find(x => x.id === s.activity[0].agent)?.name || "") : "–";
 }
 function frame(now) {
+  if (orbit3d) return;
   requestAnimationFrame(frame);
   const g = geo();
   // trails: fade, then draw strands
@@ -705,6 +725,12 @@ function connect() {
   es.onerror = () => { $("fState").textContent = "VERBINDUNG ZUM BOT UNTERBROCHEN"; $("fState").className = "down"; };
 }
 renderFilters(); resize(); addEventListener("resize", resize);
+import("./orbit3d.js").then((m) => {
+  orbit3d = m.createOrbit3D($("orbitP"), { agents: AGENTS, colors: COLOR, long: LONG, short: SHORT, flow: FLOW });
+  if (!orbit3d) return;
+  tc.style.display = oc.style.display = "none";
+  if (S) orbit3d.sync(S, []);
+}).catch((e) => console.warn("3D-Ansicht nicht verfügbar, nutze 2D", e));
 setInterval(clock, 1000); clock(); connect(); requestAnimationFrame(frame);
 </script>
 </body>
