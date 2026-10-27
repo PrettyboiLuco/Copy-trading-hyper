@@ -44,6 +44,34 @@ impl CopyConfig {
     }
 }
 
+/// What the engine decided for one coin in a planning round.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    Trade,
+    /// Already at the desired size.
+    InSync,
+    /// Adjustment below `min_order_usd`.
+    SkipMinOrder,
+    /// Adjustment below `rebalance_threshold`.
+    SkipThreshold,
+    /// Position held by the target at startup (`skip_existing`).
+    SkipExisting,
+    SkipNoPrice,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Decision {
+    pub coin: String,
+    pub target_size: f64,
+    pub desired: f64,
+    pub current: f64,
+    pub delta: f64,
+    pub mid: Option<f64>,
+    pub action: Action,
+    /// Desired size was reduced by the leverage or per-coin cap.
+    pub capped: bool,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct OrderIntent {
     pub coin: String,
@@ -94,16 +122,21 @@ impl CopyEngine {
         });
     }
 
-    /// Target position per coin for the paper account.
-    pub fn desired_positions(&self, target: &AccountSnapshot, mids: &Mids) -> HashMap<String, f64> {
-        let equity = self.account.equity(mids);
-        let scale = match self.config.sizing {
+    /// Factor applied to the target's sizes before caps.
+    pub fn scale(&self, target: &AccountSnapshot, mids: &Mids) -> f64 {
+        match self.config.sizing {
             Sizing::Proportional { multiplier } if target.account_value > 0.0 => {
-                equity / target.account_value * multiplier
+                self.account.equity(mids) / target.account_value * multiplier
             }
             Sizing::Proportional { .. } => 0.0,
             Sizing::Fixed { ratio } => ratio,
-        };
+        }
+    }
+
+    /// Target position per coin for the paper account.
+    pub fn desired_positions(&self, target: &AccountSnapshot, mids: &Mids) -> HashMap<String, f64> {
+        let equity = self.account.equity(mids);
+        let scale = self.scale(target, mids);
 
         let mut desired: HashMap<String, f64> = HashMap::new();
         for (coin, size) in &target.positions {
@@ -134,46 +167,79 @@ impl CopyEngine {
 
     /// Orders needed to move the paper account towards the target.
     pub fn plan(&mut self, target: &AccountSnapshot, mids: &Mids) -> Vec<OrderIntent> {
+        Self::orders(&self.plan_decisions(target, mids))
+    }
+
+    pub fn orders(decisions: &[Decision]) -> Vec<OrderIntent> {
+        decisions
+            .iter()
+            .filter(|d| d.action == Action::Trade)
+            .map(|d| OrderIntent {
+                coin: d.coin.clone(),
+                delta: d.delta,
+                mid: d.mid.unwrap_or_default(),
+            })
+            .collect()
+    }
+
+    /// Decision for every coin held by the target or by us, including the
+    /// ones that are skipped and why.
+    pub fn plan_decisions(&mut self, target: &AccountSnapshot, mids: &Mids) -> Vec<Decision> {
         self.update_ignored(target);
         let desired = self.desired_positions(target, mids);
+        let scale = self.scale(target, mids);
 
-        let coins: BTreeSet<String> = desired
+        let coins: BTreeSet<String> = target
+            .positions
             .keys()
             .chain(self.account.positions.keys())
             .cloned()
             .collect();
 
-        let mut orders = Vec::new();
+        let mut decisions = Vec::new();
         for coin in coins {
-            let Some(&mid) = mids.get(&coin) else {
-                continue;
-            };
+            let target_size = target.positions.get(&coin).copied().unwrap_or(0.0);
             let current = self.account.size(&coin);
             let want = desired.get(&coin).copied().unwrap_or(0.0);
+            let mid = mids.get(&coin).copied();
+            let capped = want.abs() + 1e-12 < (target_size * scale).abs()
+                && !self.ignored.contains_key(&coin);
+            let mut decision = Decision {
+                coin: coin.clone(),
+                target_size,
+                desired: want,
+                current,
+                delta: want - current,
+                mid,
+                action: Action::Trade,
+                capped: capped && mid.is_some(),
+            };
 
-            // Target closed the coin: always close fully, regardless of size.
-            if want == 0.0 && !self.ignored.contains_key(&coin) {
-                if current != 0.0 {
-                    orders.push(OrderIntent {
-                        coin,
-                        delta: -current,
-                        mid,
-                    });
+            decision.action = if self.ignored.contains_key(&coin) {
+                decision.delta = 0.0;
+                Action::SkipExisting
+            } else if let Some(mid) = mid {
+                let same_direction = current != 0.0 && current.signum() == want.signum();
+                if decision.delta == 0.0 {
+                    Action::InSync
+                } else if want == 0.0 {
+                    // Target closed the coin: always close fully, regardless of size.
+                    Action::Trade
+                } else if (decision.delta * mid).abs() < self.config.min_order_usd {
+                    Action::SkipMinOrder
+                } else if same_direction
+                    && decision.delta.abs() < self.config.rebalance_threshold * want.abs()
+                {
+                    Action::SkipThreshold
+                } else {
+                    Action::Trade
                 }
-                continue;
-            }
-
-            let delta = want - current;
-            if (delta * mid).abs() < self.config.min_order_usd {
-                continue;
-            }
-            let same_direction = current != 0.0 && current.signum() == want.signum();
-            if same_direction && delta.abs() < self.config.rebalance_threshold * want.abs() {
-                continue;
-            }
-            orders.push(OrderIntent { coin, delta, mid });
+            } else {
+                Action::SkipNoPrice
+            };
+            decisions.push(decision);
         }
-        orders
+        decisions
     }
 
     pub fn execute(&mut self, orders: &[OrderIntent]) -> Vec<Fill> {
@@ -313,6 +379,22 @@ mod tests {
             &px,
         );
         assert!(orders.iter().any(|o| o.coin == "BTC"));
+    }
+
+    #[test]
+    fn decisions_explain_skips_and_caps() {
+        let mut e = engine(1_000.0);
+        e.config.max_position_usd = Some(300.0);
+        let target = AccountSnapshot::new(100_000.0, &[("BTC", 1.0), ("ETH", 0.01), ("XYZ", 5.0)]);
+        let px = mids(&[("BTC", 60_000.0), ("ETH", 3_000.0)]);
+        let d = e.plan_decisions(&target, &px);
+        let by = |c: &str| d.iter().find(|x| x.coin == c).unwrap().clone();
+        assert_eq!(by("BTC").action, Action::Trade);
+        assert!(by("BTC").capped);
+        assert_eq!(by("ETH").action, Action::SkipMinOrder);
+        assert!(!by("ETH").capped);
+        assert_eq!(by("XYZ").action, Action::SkipNoPrice);
+        assert_eq!(CopyEngine::orders(&d).len(), 1);
     }
 
     #[test]

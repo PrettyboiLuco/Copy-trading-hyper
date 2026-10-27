@@ -101,7 +101,7 @@ pub struct Leverage {
     pub value: f64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenOrder {
     pub coin: String,

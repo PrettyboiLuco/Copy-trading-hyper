@@ -4,6 +4,7 @@
 //! size of a simulated (paper) account and "executes" the difference against
 //! current mid prices. No real orders are ever sent and no private key is used.
 
+pub mod desk;
 pub mod engine;
 pub mod hyperliquid;
 pub mod journal;

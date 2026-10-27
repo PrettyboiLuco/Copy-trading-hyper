@@ -8,6 +8,9 @@ use chrono::{Local, TimeZone};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use copy_trading_hyper::DEFAULT_TARGET_WALLET;
+use copy_trading_hyper::desk::demo::DemoSource;
+use copy_trading_hyper::desk::server::{self, Hub};
+use copy_trading_hyper::desk::{Desk, DeskOptions, DeskSource};
 use copy_trading_hyper::engine::{CopyConfig, CopyEngine, Sizing, TickReport};
 use copy_trading_hyper::hyperliquid::{
     HyperliquidClient, MAINNET_URL, TESTNET_URL, position_details,
@@ -67,6 +70,28 @@ enum Command {
         /// Also append every trade of the wallet to this CSV file.
         #[arg(long)]
         log: Option<PathBuf>,
+    },
+    /// Web dashboard: live view of the wallet, all bot agents and the paper account.
+    Dashboard {
+        #[command(flatten)]
+        copy: CopyArgs,
+        /// Address to serve the dashboard on.
+        #[arg(long, default_value = "127.0.0.1:8080")]
+        listen: String,
+        /// Use a synthetic wallet instead of the Hyperliquid API.
+        #[arg(long)]
+        demo: bool,
+        /// Polling interval in seconds (default: 5 live, 2 demo).
+        #[arg(long)]
+        interval: Option<u64>,
+        #[arg(long)]
+        testnet: bool,
+        /// Paper account state (live mode only; resumed if the file exists).
+        #[arg(long, default_value = "paper_state.json")]
+        state: PathBuf,
+        /// CSV log of simulated fills (live mode only).
+        #[arg(long, default_value = "trades.csv")]
+        journal: PathBuf,
     },
     /// Run an offline demo scenario (no network needed).
     Simulate {
@@ -227,6 +252,52 @@ fn main() -> Result<()> {
                     )?;
                 }
             }
+        }
+        Command::Dashboard {
+            copy,
+            listen,
+            demo,
+            interval,
+            testnet,
+            state,
+            journal,
+        } => {
+            let interval = Duration::from_secs(interval.unwrap_or(if demo { 2 } else { 5 }));
+            let account = if !demo && state.exists() {
+                PaperAccount::load(&state)?
+            } else {
+                copy.account()
+            };
+            let engine = CopyEngine::new(copy.config(), account);
+            let hub = Hub::default();
+            server::serve(&listen, hub.clone())?;
+
+            let (source, feed): (Box<dyn DeskSource>, _) = if demo {
+                let seed = Local::now().timestamp_nanos_opt().unwrap_or(7) as u64;
+                (Box::new(DemoSource::new(seed)), None)
+            } else {
+                let feed = ws::spawn(ws::ws_url(api_url(testnet)), copy.wallet.clone());
+                (
+                    Box::new(HyperliquidClient::new(api_url(testnet))?),
+                    Some(feed),
+                )
+            };
+            let opts = DeskOptions {
+                demo,
+                interval,
+                state_path: (!demo).then_some(state),
+                journal: if demo {
+                    None
+                } else {
+                    Some(Journal::open(&journal)?)
+                },
+            };
+            println!(
+                "Copy Desk ({}) läuft auf http://{listen} – folgt {}",
+                if demo { "DEMO" } else { "LIVE" },
+                copy.wallet
+            );
+            Desk::new(engine, hub, opts).run(source, feed);
         }
         Command::Simulate { copy } => {
             let mut source = ScriptedSource::new(demo_scenario());

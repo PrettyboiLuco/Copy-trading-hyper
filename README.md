@@ -10,6 +10,31 @@ Der Bot folgt standardmäßig der Wallet
 und spiegelt deren Perp-Positionen auf ein simuliertes Konto. Es werden **keine echten Orders**
 gesendet und **kein Private Key** benötigt – es wird nur die öffentliche `/info`-API gelesen.
 
+## Dashboard (Copy Desk)
+
+![Copy Desk](docs/desk-desktop.png)
+
+```bash
+cargo run --release -- dashboard --demo      # synthetische Wallet, läuft ohne API
+cargo run --release -- dashboard             # live gegen die Wallet
+# dann im Browser: http://127.0.0.1:8080
+```
+
+Ein Bildschirm für alles, was passiert und passieren wird:
+
+- **Orbit**: Die Wallet im Zentrum, ihre Positionen als Satelliten (Größe = Wert, grün = Long,
+  rot = Short), unsere 6 Agenten im Ring. Jeder Schritt fliegt als Lichtimpuls durch die Pipeline.
+- **Agenten** (jeder Schritt der Pipeline):
+  SPOTTER (Live-Feed) → TRACKER (Positionen syncen) → SIZER (Größe umrechnen) →
+  RISK (Hebel, Limits, Mindestorder) → EXECUTOR (Paper-Order) → LEDGER (PnL, Fees, Journal)
+- **Was passieren wird**: offene Orders der Wallet (Limit, TP, SL) sortiert nach Abstand zum Kurs,
+  jeweils mit dem, was unser Bot tun würde, wenn sie ausgeführt werden.
+- **Wallet – offene Positionen**: Größe, Einstieg → Kurs, Wert, uPnL, Hebel, Liquidationspreis.
+- **Spiegel**: Wallet-Größe vs. unser Soll vs. Ist, Abweichung und warum ggf. nicht gehandelt wurde.
+- **Paper-Konto, Risiko & Limits, Performance-Chart (wir vs. Wallet in %), Aktivitäts-Log** mit Filter pro Agent.
+
+Mit `--listen 0.0.0.0:8080` ist das Dashboard auch vom Handy im selben WLAN erreichbar.
+
 ## Trades der Wallet live verfolgen
 
 ```bash
@@ -83,6 +108,7 @@ Alle Optionen: `cargo run -- run --help`. Neu starten mit frischem Konto: `paper
 |---|---|
 | `src/hyperliquid.rs` | Read-only Client für die Hyperliquid Info-API |
 | `src/ws.rs` | WebSocket-Live-Feed (Trades + Orders der Wallet), Reconnect, Proxy |
+| `src/desk/` | Dashboard: Pipeline/Agenten-Zustand, HTTP + Server-Sent Events, Demo-Wallet, Web-Oberfläche |
 | `src/engine.rs` | Copy-Logik: Sizing, Limits, Order-Planung |
 | `src/paper.rs` | Simuliertes Konto: Fills, Fees, Slippage, PnL |
 | `src/mock.rs` | Skript-basierte Offline-Datenquelle + Demo-Szenario |
