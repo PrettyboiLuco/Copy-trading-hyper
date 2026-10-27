@@ -15,6 +15,8 @@ const PAGE: &str = include_str!("index.html");
 /// Scripts served next to the page, so the desk works without internet.
 const SCRIPTS: &[(&str, &str)] = &[
     ("/orbit3d.js", include_str!("orbit3d.js")),
+    ("/agents3d.js", include_str!("agents3d.js")),
+    ("/vendor/addons/environments/RoomEnvironment.js", include_str!("vendor/addons/environments/RoomEnvironment.js")),
     ("/vendor/three.module.min.js", include_str!("vendor/three.module.min.js")),
     ("/vendor/addons/controls/OrbitControls.js", include_str!("vendor/addons/controls/OrbitControls.js")),
     ("/vendor/addons/postprocessing/EffectComposer.js", include_str!("vendor/addons/postprocessing/EffectComposer.js")),

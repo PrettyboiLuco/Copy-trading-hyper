@@ -12,6 +12,8 @@ import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
 import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
+import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
+import { buildAgentModel, buildPad } from "./agents3d.js";
 
 const CONFIG = {
   background: "#000000",
@@ -26,6 +28,7 @@ const CONFIG = {
   coreParticles: 4200,
   agentParticles: 750,
   satParticles: 220,
+  agentAura: 260,
   diskParticles: 4200,
   ringParticles: 3200,
   mobileScale: 0.5,
@@ -41,7 +44,7 @@ const CONFIG = {
   beamBrightness: 0.55,
   beamTrail: 26,
   maxBeams: 64,
-  threads: 24,
+  threads: 14,
   beamSize: 1.0,
   ringSweepSpeed: 1.6,
   ringSweepArms: 3,
@@ -158,7 +161,7 @@ function setAttrs(geo, n) {
  * A glittering "organism": dense hot core, radial spikes and a bokeh haze.
  * Colours run hot (centre) -> warm -> body -> deep (outside).
  */
-function organism({ count, coreR, spikes, spikeLen, cone, hot, warm, body, deep }) {
+function organism({ count, coreR, spikes, spikeLen, cone, hot, warm, body, deep, hazeFrac = 0.12, bokehProb = 0.6 }) {
   const geo = new THREE.BufferGeometry();
   const a = setAttrs(geo, count);
   const C = { hot: new THREE.Color(hot), warm: new THREE.Color(warm), body: new THREE.Color(body), deep: new THREE.Color(deep) };
@@ -170,7 +173,7 @@ function organism({ count, coreR, spikes, spikeLen, cone, hot, warm, body, deep 
     dirs.push(new THREE.Vector3(Math.cos(th) * rr, y, Math.sin(th) * rr).normalize());
   }
   const p = new THREE.Vector3(), perp = new THREE.Vector3(), c = new THREE.Color();
-  const nSpike = spikes ? Math.floor(count * 0.38) : 0, nHaze = Math.floor(count * 0.12);
+  const nSpike = spikes ? Math.floor(count * 0.38) : 0, nHaze = Math.floor(count * hazeFrac);
   for (let i = 0; i < count; i++) {
     let bokeh = 0, dim = 1;
     if (i < nSpike) {
@@ -181,7 +184,7 @@ function organism({ count, coreR, spikes, spikeLen, cone, hot, warm, body, deep 
       dim = 1.1 - t * 0.5;
     } else if (i < nSpike + nHaze) {
       p.randomDirection().multiplyScalar(coreR * rand(1.1, 3.2));
-      bokeh = Math.random() < 0.6 ? 1 : 0;
+      bokeh = Math.random() < bokehProb ? 1 : 0;
       dim = 0.45;
     } else {
       p.randomDirection().multiplyScalar(coreR * Math.pow(Math.random(), 0.6));
@@ -262,6 +265,12 @@ export function createOrbit3D(container, opts) {
 
   const scene = new THREE.Scene();
   scene.fog = new THREE.FogExp2(CONFIG.background, 0.02);
+  // Reflections for the chrome/glass agent models.
+  {
+    const pmrem = new THREE.PMREMGenerator(renderer);
+    scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+    pmrem.dispose();
+  }
   const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 300);
   camera.position.set(0, 7.2, 16.5);
 
@@ -315,7 +324,7 @@ export function createOrbit3D(container, opts) {
   /* ---------- the wallet: a large organism ---------- */
   const core = track(organism({
     count: Math.round(CONFIG.coreParticles * q), coreR: 0.62, spikes: CONFIG.coreSpikes, spikeLen: 1.9, cone: 0.24,
-    hot: CONFIG.coreHot, warm: CONFIG.coreWarm, body: CONFIG.coreBody, deep: CONFIG.coreDeep,
+    hot: CONFIG.coreHot, warm: CONFIG.coreWarm, body: CONFIG.coreBody, deep: CONFIG.coreDeep, hazeFrac: 0.05, bokehProb: 0.3,
   }));
   world.add(core.points);
   const coreHaze = haze(CONFIG.coreBody, CONFIG.coreHot, 5.2);
@@ -326,6 +335,9 @@ export function createOrbit3D(container, opts) {
     new THREE.LineBasicMaterial(additive({ color: CONFIG.coreBody, opacity: 0.18 })),
   );
   world.add(coreWire);
+  // The signal source lights every agent model in orange from the centre.
+  const coreLight = new THREE.PointLight(CONFIG.coreBody, 40, 16, 1.6);
+  world.add(coreLight);
   let coreHeat = 0;
 
   /* ---------- accretion disk: particles + tangled threads ---------- */
@@ -364,7 +376,7 @@ export function createOrbit3D(container, opts) {
     }
     const line = new THREE.Line(
       new THREE.BufferGeometry().setFromPoints(pts),
-      new THREE.LineBasicMaterial(additive({ color: pick(palette), opacity: rand(0.03, 0.09) })),
+      new THREE.LineBasicMaterial(additive({ color: pick(palette), opacity: rand(0.015, 0.045) })),
     );
     line.rotation.set(rand(-0.35, 0.35), rand(0, Math.PI), rand(-0.25, 0.25));
     line.userData.w = rand(0.02, 0.09) * (Math.random() < 0.5 ? -1 : 1);
@@ -441,7 +453,7 @@ export function createOrbit3D(container, opts) {
     s.material.color.set(color);
   };
 
-  /* ---------- agents: smaller organisms in their own colour ---------- */
+  /* ---------- agents: hard-surface models on hex pads ---------- */
   const agents = new Map();
   opts.agents.forEach((ag, i) => {
     const ang = -Math.PI / 2 - Math.PI / 3 + (i * Math.PI) / 3;
@@ -449,27 +461,26 @@ export function createOrbit3D(container, opts) {
     const g = new THREE.Group();
     const home = new THREE.Vector3(Math.cos(ang) * CONFIG.ringRadius, 0, Math.sin(ang) * CONFIG.ringRadius);
     g.position.copy(home);
-    const warm = c.clone().lerp(new THREE.Color(0xffffff), 0.2);
-    const hot = c.clone().lerp(new THREE.Color(0xffffff), 0.55);
+    const model = buildAgentModel(ag.id, opts.colors[ag.id], { long: opts.long, short: opts.short });
+    model.root.scale.setScalar(1.75);
+    const pad = buildPad(opts.colors[ag.id]);
+    pad.root.scale.setScalar(1.3);
+    pad.root.position.y = -1.25;
+    // A thin shell of glints around the model, no longer the model itself.
     const org = track(organism({
-      count: Math.round(CONFIG.agentParticles * q), coreR: 0.24, spikes: CONFIG.agentSpikes, spikeLen: 0.78, cone: 0.3,
-      hot: "#" + hot.getHexString(), warm: "#" + warm.getHexString(), body: opts.colors[ag.id], deep: "#" + c.clone().multiplyScalar(0.45).getHexString(),
+      count: Math.round(CONFIG.agentAura * q), coreR: 0.75, spikes: 0, spikeLen: 0, cone: 0, hazeFrac: 1, bokehProb: 0,
+      hot: "#ffffff", warm: opts.colors[ag.id], body: opts.colors[ag.id], deep: "#" + c.clone().multiplyScalar(0.5).getHexString(),
     }));
-    const hz = haze(opts.colors[ag.id], "#" + hot.getHexString(), 1.5);
-    billboards.push(hz);
-    // Faint pylon down to the disk plane.
-    const pylon = new THREE.Line(
-      new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, -0.5, 0), new THREE.Vector3(0, -2.2, 0)]),
-      new THREE.LineBasicMaterial(additive({ color: c, opacity: 0.18 })),
-    );
-    g.add(org.points, hz, pylon);
+    org.u.uBright.value = CONFIG.brightness * 1.6;
+    const light = new THREE.PointLight(c, 2, 2.8, 2);
+    g.add(model.root, pad.root, org.points, light);
     world.add(g);
     const el = document.createElement("div");
     el.className = "lab3 ag";
     el.style.setProperty("--c", opts.colors[ag.id]);
     el.innerHTML = `<b>${ag.name}</b><span>–</span>`;
     labels.appendChild(el);
-    agents.set(ag.id, { g, org, hz, home, phase: i * 1.1, heat: 0, el, count: el.querySelector("span") });
+    agents.set(ag.id, { g, model, pad, org, light, home, phase: i * 1.1, heat: 0, el, count: el.querySelector("span"), portPos: home.clone() });
   });
 
   /* ---------- pipeline links (faint arcs that light up with traffic) ---------- */
@@ -545,13 +556,14 @@ export function createOrbit3D(container, opts) {
   const WHITE = new THREE.Color(0xffffff);
 
   function posOf(key, out) {
+    if (typeof key !== "string") return out.copy(key);
     if (key === "center") return out.set(0, 0, 0);
     if (key.startsWith("sat:")) {
       const s = sats.get(key.slice(4));
       return s ? satWorldPos(s, out) : out.set(0, 0, 0);
     }
     const a = agents.get(key);
-    return a ? out.copy(a.g.position) : out.set(0, 0, 0);
+    return a ? out.copy(a.portPos) : out.set(0, 0, 0);
   }
 
   function fire(from, to, color, o = {}) {
@@ -562,7 +574,8 @@ export function createOrbit3D(container, opts) {
       dur: o.dur ?? rand(0.9, 1.5), trail: o.trail ?? 0.3, power: o.power ?? 0.5,
       lift: o.lift ?? rand(0.8, 2.6), size: o.size ?? 0.7, onArrive: o.onArrive, spray: o.spray ?? 0.05,
     });
-    const l = linkMap.get(linkKey(from.startsWith("sat:") ? "center" : from, to.startsWith("sat:") ? "center" : to));
+    const node = (k) => (typeof k !== "string" ? null : k.startsWith("sat:") ? "center" : k);
+    const l = node(from) && node(to) && linkMap.get(linkKey(node(from), node(to)));
     if (l) l.heat = Math.min(1, l.heat + b.power * 0.6);
   }
 
@@ -587,11 +600,47 @@ export function createOrbit3D(container, opts) {
     org.u.uShockAmp.value = amp;
   }
 
+  // Short spark burst where a beam docks.
+  function sparks(id, color, n = 7) {
+    const a = agents.get(id);
+    if (!a) return;
+    for (let i = 0; i < n; i++) {
+      const to = new THREE.Vector3().randomDirection().multiplyScalar(rand(0.35, 0.8)).add(a.portPos);
+      fire(a.portPos.clone(), to, color, { dur: rand(0.22, 0.38), trail: 0.7, lift: 0, size: 0.35, power: 1.1, spray: 0 });
+    }
+  }
+
   function pulseAgent(id, power = 1) {
     const a = agents.get(id);
     if (!a) return;
     a.heat = Math.min(1.4, a.heat + power);
     shock(a.org, Math.min(1.2, power));
+    a.pad.start();
+  }
+
+  // Each model reacts to its own kind of work.
+  function triggerModel(a, coin) {
+    const ag = agents.get(a.agent);
+    if (!ag) return;
+    const m = ag.model;
+    switch (a.agent) {
+      case "spotter": {
+        const s = coin && sats.get(coin);
+        m.on("scan", world.localToWorld(s ? satWorldPos(s, new THREE.Vector3()) : new THREE.Vector3()));
+        break;
+      }
+      case "risk":
+        m.on(a.level === "warn" || a.level === "skip" ? "block" : "ok");
+        break;
+      case "executor":
+        m.on("fire", world.localToWorld(agents.get("ledger").g.position.clone()));
+        break;
+      case "ledger":
+        m.on(a.level === "pnl" ? "pnl" : "tick", a.value ?? 0);
+        break;
+      default:
+        m.on("work");
+    }
   }
 
   /* ---------- ambient chatter: scans and messages between agents ---------- */
@@ -635,6 +684,8 @@ export function createOrbit3D(container, opts) {
         power: big ? 1.6 : 1.05, dur: big ? 1.25 : 1.0, trail: 0.42, size: big ? 1.5 : 1.1, spray: big ? 0.12 : 0.07, lift: rand(1.2, 2.2),
         onArrive: () => {
           pulseAgent(a.agent, big ? 1.2 : 0.8);
+          triggerModel(a, coin);
+          sparks(a.agent, color, big ? 10 : 6);
           if (Math.random() < 0.65) fire(to, from, color, { power: 0.5, dur: 0.9, size: 0.7 });
         },
       });
@@ -676,7 +727,7 @@ export function createOrbit3D(container, opts) {
     composer.setSize(W, H);
     camera.aspect = W / H;
     // Keep the whole ring in view on narrow screens.
-    const dist = 17.5 * Math.pow(Math.max(1, 1.45 / camera.aspect), 0.62);
+    const dist = 17.5 * Math.pow(Math.max(1, 1.45 / camera.aspect), 0.72);
     camera.position.setLength(dist);
     camera.updateProjectionMatrix();
   }
@@ -748,19 +799,24 @@ export function createOrbit3D(container, opts) {
     stepOrganism(core, dt, coreHeat);
     coreHaze.material.uniforms.uGlow.value = 0.8 + coreHeat * 0.6;
     coreHaze.material.uniforms.uTime.value = now;
+    coreLight.intensity = 40 + coreHeat * 60;
     coreWire.rotation.y += dt * 0.2;
     coreWire.rotation.x += dt * 0.07;
 
     for (const [, a] of agents) {
       a.heat *= Math.exp(-dt * 1.6);
-      a.g.position.set(a.home.x, Math.sin(now * 1.3 + a.phase) * 0.22, a.home.z);
-      a.org.points.rotation.y += dt * (0.35 + a.heat * 2.5) * speed;
-      a.org.points.rotation.z += dt * 0.15 * speed;
-      stepOrganism(a.org, dt, Math.min(1, a.heat));
-      a.hz.material.uniforms.uGlow.value = 0.3 + Math.min(1, a.heat) * 0.35;
-      a.hz.material.uniforms.uTime.value = now + a.phase;
+      const heat = Math.min(1, a.heat);
+      a.g.position.set(a.home.x, Math.sin(now * 1.3 + a.phase) * 0.12, a.home.z);
+      a.model.tick(dt * speed, heat, now);
+      a.pad.tick(dt, heat, now);
+      a.org.points.rotation.y += dt * (0.3 + heat * 2) * speed;
+      stepOrganism(a.org, dt, heat);
+      a.light.intensity = 2 + heat * 7;
+      // Beams dock onto the model's port, wherever the model has moved it.
+      a.model.port.getWorldPosition(a.portPos);
+      world.worldToLocal(a.portPos);
       a.el.classList.toggle("hot", a.heat > 0.25);
-      place(a.el, a.g.position, 24);
+      place(a.el, tmp.set(a.g.position.x, a.g.position.y - 1.35, a.g.position.z), 8);
     }
 
     for (const l of links) {
@@ -886,7 +942,7 @@ export function createOrbit3D(container, opts) {
       for (const k of [...sats.keys()]) if (!keep.has(k)) dropSat(k);
       for (const a of state.agents) {
         const ag = agents.get(a.id);
-        if (ag) ag.count.textContent = a.count + " Schritte";
+        if (ag) ag.count.textContent = String(a.count);
       }
       const short = state.wallet ? state.wallet.slice(0, 6) + "…" + state.wallet.slice(-4) : "–";
       center.innerHTML = `<span>SIGNALQUELLE</span><b>${short}</b>`;

@@ -24,7 +24,10 @@ Ein Bildschirm für alles, was passiert und passieren wird:
 
 - **Orbit (3D)**: Die gefolgte Wallet als orangene *Signalquelle* im Zentrum – dort entstehen die
   Signale. Ihre Positionen kreisen als Satelliten (grün = Long, rot = Short), unsere 6 Agenten sitzen
-  als Licht-Organismen im Ring. Jeder Schritt fliegt als Komet durch die Pipeline, dazu laufen
+  als eigene 3D-Modelle aus Chrom und Glas auf Podesten mit Statusring im Ring: SPOTTER (Radarschüssel,
+  zielt mit Scan-Kegel auf den erkannten Coin), TRACKER (Gyroskop), SIZER (geschachtelte Würfel),
+  RISK (Käfig mit Schilden, die beim Deckeln aufklappen), EXECUTOR (Kristall, der beim Auslösen
+  zustößt), LEDGER (Münzstapel, der mit jedem Gewinn wächst). Jeder Schritt fliegt als Komet durch die Pipeline, dazu laufen
   Scans zwischen Agenten und Quelle. Passt die Qualität automatisch an langsame Geräte an.
 - **Agenten** (jeder Schritt der Pipeline):
   SPOTTER (Live-Feed) → TRACKER (Positionen syncen) → SIZER (Größe umrechnen) →

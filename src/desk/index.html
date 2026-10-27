@@ -92,8 +92,14 @@ header { display: flex; align-items: center; gap: 14px; padding: 8px 12px; borde
 .lab3 { position: absolute; left: 0; top: 0; text-align: center; white-space: nowrap; font-size: 9px; color: var(--muted);
   letter-spacing: .08em; text-shadow: 0 0 6px #000, 0 0 2px #000; will-change: transform; }
 .lab3 b { display: block; font-size: 10px; letter-spacing: .12em; }
-.lab3.ag b { color: #e9eef6; transition: color .3s, text-shadow .3s; }
-.lab3.ag.hot b { color: var(--c); text-shadow: 0 0 10px var(--c); }
+/* Agent name plates sit under each pad: name + step count in one pill. */
+.lab3.ag { display: inline-flex; align-items: center; gap: 7px; padding: 3px 9px; border-radius: 999px;
+  background: rgba(0, 0, 0, .72); border: 1px solid color-mix(in srgb, var(--c) 45%, transparent);
+  text-shadow: none; transition: border-color .3s, box-shadow .3s; }
+.lab3.ag b { display: inline; color: #f2f2f2; font-size: 9.5px; transition: color .3s; }
+.lab3.ag span { color: var(--c); font-weight: 700; font-size: 9.5px; }
+.lab3.ag.hot { border-color: var(--c); box-shadow: 0 0 14px -2px var(--c); }
+.lab3.ag.hot b { color: var(--c); }
 .lab3.core span { font-size: 8.5px; letter-spacing: .2em; color: var(--source); font-weight: 700; }
 .lab3.core b { color: #fff; font-size: 11px; }
 .ov { position: absolute; z-index: 2; pointer-events: none; }
@@ -188,6 +194,8 @@ footer { margin-top: 10px; display: flex; justify-content: space-between; gap: 1
   .ent { grid-template-columns: 50px 60px minmax(0, 1fr); }
   .ent .v { grid-column: 3; }
   .hide-sm { display: none; }
+  .lab3.ag { gap: 5px; padding: 2px 6px; }
+  .lab3.ag b, .lab3.ag span { font-size: 7.5px; letter-spacing: .08em; }
   .ov.br { display: none; }
 }
 </style>
