@@ -728,7 +728,50 @@ function clock() {
   if (S) $("fUpd").textContent = "LETZTES UPDATE VOR " + ago(S.updated).toUpperCase() + " · GESTARTET " + hhmmss(S.started);
   tickAgents();
 }
+// Plays a recorded state stream in a loop instead of connecting to the bot.
+// Frames carry only new activity and the newest history point; timestamps
+// are shifted to "now" so ages and the chart read as live.
+async function replay(src) {
+  let frames;
+  try {
+    frames = (await (await fetch(src)).json()).frames;
+  } catch (e) {
+    $("banner").style.display = "block";
+    $("banner").textContent = "Aufzeichnung konnte nicht geladen werden.";
+    return;
+  }
+  let i = 0, loop = 0, activity = [], history = [];
+  const step = () => {
+    if (i === 0) {
+      activity = [];
+      history = [];
+    }
+    const f = structuredClone(frames[i]);
+    const shift = Date.now() - f.updated;
+    const t = (x) => (x ? x + shift : x);
+    f.started = t(frames[0].started);
+    f.updated = Date.now();
+    f.feed.last_event_ts = t(f.feed.last_event_ts);
+    for (const a of f.agents) a.last_ts = t(a.last_ts);
+    for (const a of f.activity) {
+      a.ts = t(a.ts);
+      a.seq += loop * 1e6;
+    }
+    activity = f.activity.concat(activity).slice(0, 300);
+    for (const h of f.history) history.push([h[0] + shift, h[1], h[2]]);
+    if (history.length > 900) history.shift();
+    f.activity = activity;
+    f.history = history.slice();
+    render(f);
+    i = (i + 1) % frames.length;
+    if (i === 0) loop++;
+    setTimeout(step, 1000);
+  };
+  step();
+}
+
 function connect() {
+  if (window.DESK_REPLAY) return replay(window.DESK_REPLAY);
   if (location.protocol === "file:") {
     $("banner").style.display = "block";
     $("banner").textContent = "Bitte über den Bot öffnen: cargo run -- dashboard --demo  →  http://127.0.0.1:8080";
